@@ -63,6 +63,7 @@ pub fn create_tray(
 
 fn open_settings_window(app_handle: &tauri::AppHandle) {
     if let Some(window) = app_handle.get_webview_window("settings") {
+        window.show().ok();
         window.set_focus().ok();
         return;
     }

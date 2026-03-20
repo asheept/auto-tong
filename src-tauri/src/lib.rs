@@ -140,11 +140,36 @@ pub fn run() {
             // 백그라운드 업데이트 체크
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                use tauri_plugin_notification::NotificationExt;
                 match handle.updater().unwrap().check().await {
                     Ok(Some(update)) => {
                         log::info!("업데이트 발견: {}", update.version);
-                        if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
-                            log::error!("업데이트 설치 실패: {}", e);
+                        handle.notification()
+                            .builder()
+                            .title("Auto-Tong 업데이트")
+                            .body(&format!("v{} 업데이트를 설치합니다...", update.version))
+                            .show()
+                            .ok();
+
+                        match update.download_and_install(|_, _| {}, || {}).await {
+                            Ok(()) => {
+                                log::info!("업데이트 설치 완료: {}", update.version);
+                                handle.notification()
+                                    .builder()
+                                    .title("Auto-Tong 업데이트 완료")
+                                    .body(&format!("v{} 설치 완료. 앱을 재시작해주세요.", update.version))
+                                    .show()
+                                    .ok();
+                            }
+                            Err(e) => {
+                                log::error!("업데이트 설치 실패: {}", e);
+                                handle.notification()
+                                    .builder()
+                                    .title("Auto-Tong 업데이트 실패")
+                                    .body(&format!("업데이트 설치 중 오류: {}", e))
+                                    .show()
+                                    .ok();
+                            }
                         }
                     }
                     Ok(None) => log::info!("최신 버전입니다"),
