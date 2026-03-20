@@ -23,7 +23,7 @@ async function loadHistory() {
     empty.style.display = "block";
   } else {
     empty.style.display = "none";
-    history.forEach((item) => {
+    history.slice(-5).reverse().forEach((item) => {
       const li = document.createElement("li");
       li.textContent = item;
       list.appendChild(li);

@@ -20,6 +20,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": "v1Compatible"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFCRTVCMEUzQjlDQjM0ODMKUldTRE5NdTU0N0RsRytuV2lYQm1oZXhqRkE1enQ4OERYQUdveVFSNTg0RDdlSmUvTm9sTnZpZ0gK",
+      "endpoints": [
+        "https://github.com/asheept/auto-tong/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

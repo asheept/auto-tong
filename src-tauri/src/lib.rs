@@ -7,6 +7,7 @@ mod watcher;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_updater::UpdaterExt;
 
 #[tauri::command]
 fn get_config() -> config::AppConfig {
@@ -95,6 +96,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![]),
@@ -135,6 +137,21 @@ pub fn run() {
                 }
             }
 
+            // 백그라운드 업데이트 체크
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match handle.updater().unwrap().check().await {
+                    Ok(Some(update)) => {
+                        log::info!("업데이트 발견: {}", update.version);
+                        if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                            log::error!("업데이트 설치 실패: {}", e);
+                        }
+                    }
+                    Ok(None) => log::info!("최신 버전입니다"),
+                    Err(e) => log::warn!("업데이트 확인 실패: {}", e),
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -144,6 +161,13 @@ pub fn run() {
             get_push_path,
             get_import_history,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 설정 창 닫기 시 앱 종료 대신 창만 숨김
+                api.prevent_close();
+                window.hide().ok();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("Auto-Tong 실행 오류");
 }

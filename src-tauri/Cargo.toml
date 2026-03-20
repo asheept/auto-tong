@@ -17,6 +17,7 @@ notify = "8"
 dirs = "6"
 zip = "2"
 walkdir = "2"
+tauri-plugin-updater = "2"
 log = "0.4"
 simplelog = "0.12"
 tokio = { version = "1", features = ["fs", "process", "sync", "time", "rt-multi-thread", "macros"] }
