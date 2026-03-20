@@ -1,0 +1,149 @@
+mod config;
+mod prismlauncher;
+mod tracker;
+mod tray;
+mod watcher;
+
+use std::sync::Arc;
+use tauri::Manager;
+use tauri_plugin_autostart::MacosLauncher;
+
+#[tauri::command]
+fn get_config() -> config::AppConfig {
+    config::load()
+}
+
+#[tauri::command]
+fn save_config(
+    app_handle: tauri::AppHandle,
+    new_config: config::AppConfig,
+) -> Result<(), String> {
+    // Handle autostart
+    use tauri_plugin_autostart::ManagerExt;
+    let autostart = app_handle.autolaunch();
+    if new_config.autostart {
+        autostart.enable().map_err(|e| e.to_string())?;
+    } else {
+        autostart.disable().map_err(|e| e.to_string())?;
+    }
+
+    config::save(&new_config)?;
+
+    // Notify watcher of config change
+    if let Some(tx) = app_handle.try_state::<WatcherTx>() {
+        let tx = tx.0.clone();
+        tauri::async_runtime::spawn(async move {
+            tx.send(watcher::WatcherCommand::UpdateConfig(new_config))
+                .await
+                .ok();
+        });
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_now(app_handle: tauri::AppHandle) -> Result<String, String> {
+    if let Some(tx) = app_handle.try_state::<WatcherTx>() {
+        tx.0.send(watcher::WatcherCommand::CheckNow)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok("가져오기 요청을 보냈습니다".to_string())
+    } else {
+        Err("Watcher가 실행 중이 아닙니다".to_string())
+    }
+}
+
+#[tauri::command]
+fn get_push_path() -> String {
+    let config = config::load();
+    config.drive_sync_folder.clone()
+}
+
+#[tauri::command]
+fn get_import_history(app_handle: tauri::AppHandle) -> Vec<String> {
+    if let Some(tracker) = app_handle.try_state::<Arc<tracker::Tracker>>() {
+        tracker.get_history()
+    } else {
+        vec![]
+    }
+}
+
+struct WatcherTx(tokio::sync::mpsc::Sender<watcher::WatcherCommand>);
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+fn init_logger() {
+    use simplelog::*;
+    use std::fs::File;
+
+    let log_path = config::config_dir().join("auto-tong.log");
+    let mut loggers: Vec<Box<dyn SharedLogger>> = vec![
+        TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
+    ];
+
+    if let Ok(file) = File::create(&log_path) {
+        loggers.push(WriteLogger::new(LevelFilter::Info, Config::default(), file));
+    }
+
+    CombinedLogger::init(loggers).ok();
+    log::info!("로그 파일: {}", log_path.display());
+}
+
+pub fn run() {
+    init_logger();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .setup(|app| {
+            let config = config::load();
+            let tracker = Arc::new(tracker::Tracker::new());
+
+            // Store tracker in app state
+            app.manage(tracker.clone());
+
+            // Start watcher
+            let watcher_tx =
+                watcher::start(config.clone(), tracker, app.app_handle().clone());
+
+            // Store watcher tx in app state
+            app.manage(WatcherTx(watcher_tx.clone()));
+
+            // Create system tray
+            tray::create_tray(app, watcher_tx)
+                .map_err(|e| format!("트레이 생성 실패: {}", e))?;
+
+            // If drive_sync_folder is empty (first run), open settings
+            if config.drive_sync_folder.is_empty() {
+                if let Some(handle) = app.get_webview_window("settings") {
+                    handle.set_focus().ok();
+                } else {
+                    tauri::WebviewWindowBuilder::new(
+                        app,
+                        "settings",
+                        tauri::WebviewUrl::App("index.html".into()),
+                    )
+                    .title("Auto-Tong 설정")
+                    .inner_size(480.0, 520.0)
+                    .resizable(false)
+                    .center()
+                    .build()?;
+                }
+            }
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            check_now,
+            get_push_path,
+            get_import_history,
+        ])
+        .run(tauri::generate_context!())
+        .expect("Auto-Tong 실행 오류");
+}

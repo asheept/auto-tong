@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto-Tong 설정</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Auto-Tong 설정</h1>
+
+    <form id="settings-form">
+      <div class="field">
+        <label for="drive_sync_folder">Drive 동기화 폴더</label>
+        <div class="input-row">
+          <input type="text" id="drive_sync_folder" readonly>
+          <button type="button" id="btn-pick-drive">찾기</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="prismlauncher_exe">PrismLauncher 경로</label>
+        <div class="input-row">
+          <input type="text" id="prismlauncher_exe" readonly>
+          <button type="button" id="btn-pick-prism">찾기</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="subscribed_tags">구독 태그 (쉼표 구분)</label>
+        <input type="text" id="subscribed_tags" placeholder="예: everyone, 각별, daily">
+      </div>
+
+      <div class="field">
+        <label for="poll_interval_secs">확인 주기 (초)</label>
+        <input type="number" id="poll_interval_secs" min="10" max="3600" value="60">
+      </div>
+
+      <div class="field checkbox-field">
+        <label>
+          <input type="checkbox" id="autostart">
+          Windows 시작 시 자동 실행
+        </label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" id="btn-save">저장</button>
+        <button type="button" id="btn-check-now" class="btn-secondary">지금 가져오기</button>
+      </div>
+
+      <div id="toast" class="toast hidden">저장되었습니다</div>
+
+      <div id="progress-section" class="progress-section hidden">
+        <div class="progress-info">
+          <span id="progress-filename"></span>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <span id="progress-status" class="progress-status"></span>
+      </div>
+    </form>
+
+    <hr>
+
+    <div class="history-section">
+      <h2>가져오기 이력</h2>
+      <ul id="history-list"></ul>
+      <p id="history-empty" class="empty-text">아직 가져온 모드팩이 없습니다</p>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

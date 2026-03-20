@@ -1,0 +1,16 @@
+{
+  "identifier": "default",
+  "windows": ["settings"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "notification:allow-notify",
+    "notification:allow-request-permission",
+    "dialog:default",
+    "dialog:allow-open",
+    "autostart:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
+}
