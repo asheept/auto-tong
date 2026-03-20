@@ -123,6 +123,25 @@ listen("import-progress", (event) => {
   }
 });
 
+// Update check
+$("#btn-update").addEventListener("click", async () => {
+  const btn = $("#btn-update");
+  const status = $("#update-status");
+  btn.disabled = true;
+  btn.textContent = "확인 중...";
+  status.textContent = "";
+
+  try {
+    const result = await invoke("check_update");
+    status.textContent = result;
+  } catch (err) {
+    status.textContent = "오류: " + err;
+  }
+
+  btn.disabled = false;
+  btn.textContent = "업데이트 확인";
+});
+
 // Initialize
 loadConfig();
 loadHistory();

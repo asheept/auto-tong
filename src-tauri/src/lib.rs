@@ -56,6 +56,11 @@ async fn check_now(app_handle: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
 fn get_push_path() -> String {
     let config = config::load();
     config.drive_sync_folder.clone()
@@ -67,6 +72,38 @@ fn get_import_history(app_handle: tauri::AppHandle) -> Vec<String> {
         tracker.get_history()
     } else {
         vec![]
+    }
+}
+
+#[tauri::command]
+async fn check_update(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let updater = app_handle.updater().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version_for_spawn = update.version.clone();
+            let version_for_return = update.version.clone();
+            log::info!("업데이트 발견: {}", version_for_return);
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_notification::NotificationExt;
+                match update.download_and_install(|_, _| {}, || {}).await {
+                    Ok(()) => {
+                        log::info!("업데이트 설치 완료: {}", version_for_spawn);
+                        app_handle.notification()
+                            .builder()
+                            .title("Auto-Tong 업데이트 완료")
+                            .body(&format!("v{} 설치 완료. 앱을 재시작해주세요.", version_for_spawn))
+                            .show()
+                            .ok();
+                    }
+                    Err(e) => {
+                        log::error!("업데이트 설치 실패: {}", e);
+                    }
+                }
+            });
+            Ok(format!("v{} 업데이트를 설치합니다...", version_for_return))
+        }
+        Ok(None) => Ok("최신 버전입니다".to_string()),
+        Err(e) => Err(format!("업데이트 확인 실패: {}", e)),
     }
 }
 
@@ -143,21 +180,22 @@ pub fn run() {
                 use tauri_plugin_notification::NotificationExt;
                 match handle.updater().unwrap().check().await {
                     Ok(Some(update)) => {
-                        log::info!("업데이트 발견: {}", update.version);
+                        let ver = update.version.clone();
+                        log::info!("업데이트 발견: {}", ver);
                         handle.notification()
                             .builder()
                             .title("Auto-Tong 업데이트")
-                            .body(&format!("v{} 업데이트를 설치합니다...", update.version))
+                            .body(&format!("v{} 업데이트를 설치합니다...", ver))
                             .show()
                             .ok();
 
                         match update.download_and_install(|_, _| {}, || {}).await {
                             Ok(()) => {
-                                log::info!("업데이트 설치 완료: {}", update.version);
+                                log::info!("업데이트 설치 완료: {}", ver);
                                 handle.notification()
                                     .builder()
                                     .title("Auto-Tong 업데이트 완료")
-                                    .body(&format!("v{} 설치 완료. 앱을 재시작해주세요.", update.version))
+                                    .body(&format!("v{} 설치 완료. 앱을 재시작해주세요.", ver))
                                     .show()
                                     .ok();
                             }
@@ -183,6 +221,8 @@ pub fn run() {
             get_config,
             save_config,
             check_now,
+            check_update,
+            get_version,
             get_push_path,
             get_import_history,
         ])

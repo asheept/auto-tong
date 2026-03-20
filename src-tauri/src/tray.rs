@@ -11,12 +11,16 @@ pub fn create_tray(
     app: &tauri::App,
     watcher_tx: mpsc::Sender<WatcherCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let version_label = format!("Auto-Tong v{}", env!("CARGO_PKG_VERSION"));
+    let version_item = MenuItemBuilder::with_id("version", &version_label).enabled(false).build(app)?;
     let check_now = MenuItemBuilder::with_id("check_now", "지금 확인").build(app)?;
     let copy_path = MenuItemBuilder::with_id("copy_push_path", "내보내기 경로 복사").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "설정").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "종료").build(app)?;
 
     let menu = MenuBuilder::new(app)
+        .item(&version_item)
+        .separator()
         .item(&check_now)
         .separator()
         .item(&copy_path)
@@ -28,7 +32,12 @@ pub fn create_tray(
     let _tray = TrayIconBuilder::new()
         .menu(&menu)
         .tooltip("Auto-Tong")
-        .icon(tauri::include_image!("icons/32x32.png"))
+        .icon(tauri::include_image!("icons/icon.png"))
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+                open_settings_window(tray.app_handle());
+            }
+        })
         .on_menu_event(move |app_handle, event| {
             let id = event.id().as_ref();
             match id {
