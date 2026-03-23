@@ -1,40 +1,69 @@
 use std::fs;
 use std::io;
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Command에 플랫폼별 플래그 적용
+fn silent_command(cmd: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 
 pub fn import_modpack<F>(exe_path: &str, zip_path: &Path, on_progress: F) -> Result<(), String>
 where
     F: Fn(usize, usize),
 {
-    let instances_dir = dirs::config_dir()
-        .ok_or("APPDATA 경로를 찾을 수 없습니다")?
-        .join("PrismLauncher")
-        .join("instances");
-
-    if !instances_dir.exists() {
-        let exe_parent = Path::new(exe_path).parent().ok_or("exe 경로 오류")?;
-        let portable_instances = exe_parent.join("instances");
-        if portable_instances.exists() {
-            return extract_zip(zip_path, &portable_instances, on_progress);
-        }
-        return Err(format!(
-            "PrismLauncher instances 폴더를 찾을 수 없습니다: {}",
-            instances_dir.display()
-        ));
-    }
-
+    let instances_dir = prism_instances_dir(exe_path)?;
     extract_zip(zip_path, &instances_dir, on_progress)
 }
 
+/// PrismLauncher instances 폴더 찾기 (플랫폼별)
+fn prism_instances_dir(exe_path: &str) -> Result<std::path::PathBuf, String> {
+    // 1. 표준 경로
+    let standard = dirs::config_dir()
+        .ok_or("설정 경로를 찾을 수 없습니다")?
+        .join("PrismLauncher")
+        .join("instances");
+    if standard.exists() {
+        return Ok(standard);
+    }
+
+    // 2. macOS 대체 경로
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            let mac_path = home
+                .join("Library/Application Support/PrismLauncher/instances");
+            if mac_path.exists() {
+                return Ok(mac_path);
+            }
+        }
+    }
+
+    // 3. 포터블 설치
+    let exe_parent = Path::new(exe_path).parent().ok_or("exe 경로 오류")?;
+    let portable_instances = exe_parent.join("instances");
+    if portable_instances.exists() {
+        return Ok(portable_instances);
+    }
+
+    Err(format!(
+        "PrismLauncher instances 폴더를 찾을 수 없습니다: {}",
+        standard.display()
+    ))
+}
+
 /// 파일이름에서 확장자만 제거하여 인스턴스 이름으로 사용
-/// 예: "260320-공룡킬-@각별.zip" → "260320-공룡킬-@각별"
-/// 예: "@everyone.zip" → "@everyone"
 fn instance_name_from_zip(zip_path: &Path) -> String {
-    zip_path.file_stem()
+    zip_path
+        .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
         .trim()
@@ -51,26 +80,22 @@ where
         return Err("파일이름에서 인스턴스 이름을 추출할 수 없습니다".to_string());
     }
 
-    let file = fs::File::open(zip_path)
-        .map_err(|e| format!("zip 파일 열기 실패: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("zip 읽기 실패: {}", e))?;
+    let file =
+        fs::File::open(zip_path).map_err(|e| format!("zip 파일 열기 실패: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("zip 읽기 실패: {}", e))?;
 
-    // zip 구조 감지: 엔트리 이름(문자열)으로 판단
-    // flat: instance.cfg가 루트에 있음 → 그대로 instance_name/ 에 풀기
-    // wrapped: 루트폴더/instance.cfg → 루트폴더를 제거하고 풀기
+    // zip 구조 감지
     let mut root_prefix: Option<String> = None;
     {
         for i in 0..archive.len() {
             if let Ok(entry) = archive.by_index(i) {
                 let name = entry.name().replace('\\', "/");
                 if name == "instance.cfg" || name == "mmc-pack.json" {
-                    // flat 형식
                     root_prefix = None;
                     break;
                 }
                 if name.ends_with("/instance.cfg") || name.ends_with("/mmc-pack.json") {
-                    // wrapped 형식: 첫 번째 / 앞이 루트 폴더
                     if let Some(pos) = name.find('/') {
                         root_prefix = Some(format!("{}/", &name[..pos]));
                     }
@@ -91,7 +116,8 @@ where
     fs::create_dir_all(&instance_dir).ok();
 
     for i in 0..total {
-        let mut entry = archive.by_index(i)
+        let mut entry = archive
+            .by_index(i)
             .map_err(|e| format!("zip 엔트리 읽기 실패: {}", e))?;
 
         let raw_name = entry.name().replace('\\', "/");
@@ -100,12 +126,10 @@ where
             continue;
         }
 
-        // 루트 폴더 제거 (wrapped 형식일 때)
         let relative_name = if let Some(ref prefix) = root_prefix {
             if let Some(rest) = raw_name.strip_prefix(prefix.as_str()) {
                 rest.to_string()
             } else if raw_name.trim_end_matches('/') == prefix.trim_end_matches('/') {
-                // 루트 폴더 엔트리 자체 → 건너뜀
                 on_progress(i + 1, total);
                 continue;
             } else {
@@ -141,13 +165,17 @@ where
     let cfg_path = instance_dir.join("instance.cfg");
     if cfg_path.exists() {
         if let Ok(content) = fs::read_to_string(&cfg_path) {
-            let updated = content.lines().map(|line| {
-                if line.starts_with("name=") {
-                    format!("name={}", instance_name)
-                } else {
-                    line.to_string()
-                }
-            }).collect::<Vec<_>>().join("\n");
+            let updated = content
+                .lines()
+                .map(|line| {
+                    if line.starts_with("name=") {
+                        format!("name={}", instance_name)
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             fs::write(&cfg_path, updated).ok();
         }
     }
@@ -158,42 +186,69 @@ where
 
 /// PrismLauncher 프로세스 상태를 확인하고 PID를 반환
 fn get_pid_by_path(exe_path: &str) -> Option<u32> {
-    let normalized = exe_path.replace('/', "\\");
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile", "-Command",
+    #[cfg(target_os = "windows")]
+    {
+        let normalized = exe_path.replace('/', "\\");
+        let output = silent_command(Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
             &format!(
                 "Get-Process | Where-Object {{ $_.Path -eq '{}' }} | Select-Object -First 1 -ExpandProperty Id",
                 normalized
             ),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
+        ]))
         .output()
         .ok()?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<u32>().ok()
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.trim().parse::<u32>().ok()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = Command::new("pgrep")
+            .args(["-f", exe_path])
+            .output()
+            .ok()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().next()?.trim().parse::<u32>().ok()
+    }
 }
 
 /// 해당 PID의 자식 프로세스 중 java가 있는지 확인
 fn has_java_child(parent_pid: u32) -> bool {
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile", "-Command",
+    #[cfg(target_os = "windows")]
+    {
+        let output = silent_command(Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
             &format!(
                 "Get-CimInstance Win32_Process | Where-Object {{ $_.ParentProcessId -eq {} -and $_.Name -match 'java' }} | Select-Object -First 1 ProcessId",
                 parent_pid
             ),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
+        ]))
         .output();
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().any(|line| line.trim().parse::<u32>().is_ok())
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.lines().any(|line| line.trim().parse::<u32>().is_ok())
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = Command::new("pgrep")
+            .args(["-P", &parent_pid.to_string(), "java"])
+            .output();
+
+        match output {
+            Ok(o) => !o.stdout.is_empty(),
+            Err(_) => false,
+        }
     }
 }
 
@@ -202,15 +257,14 @@ pub fn try_refresh(exe_path: &str) -> bool {
     match get_pid_by_path(exe_path) {
         Some(pid) => {
             if has_java_child(pid) {
-                log::info!("PrismLauncher(PID:{}) 게임 실행 중 — 대기 (녹화 보호)", pid);
+                log::info!(
+                    "PrismLauncher(PID:{}) 게임 실행 중 — 대기 (녹화 보호)",
+                    pid
+                );
                 false
             } else {
                 log::info!("PrismLauncher(PID:{}) 게임 미실행 — 재시작", pid);
-                Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/F"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                    .ok();
+                kill_process(pid);
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 Command::new(exe_path).spawn().ok();
                 true
@@ -221,5 +275,22 @@ pub fn try_refresh(exe_path: &str) -> bool {
             log::info!("PrismLauncher 시작됨: {}", exe_path);
             true
         }
+    }
+}
+
+fn kill_process(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        silent_command(Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]))
+            .output()
+            .ok();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output()
+            .ok();
     }
 }
