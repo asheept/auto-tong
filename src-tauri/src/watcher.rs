@@ -197,6 +197,27 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
             emit_progress(app_handle, &display_name, percent, "가져오는 중...");
         }) {
             Ok(()) => {
+                emit_progress(app_handle, &display_name, 100, "Java 확인 중...");
+
+                // Java 자동 설정
+                let instance_name = path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let instances_dir = dirs::config_dir()
+                    .map(|d| d.join("PrismLauncher").join("instances").join(&instance_name));
+                if let Some(inst_dir) = instances_dir {
+                    if inst_dir.exists() {
+                        match crate::java::setup_java_for_instance(&inst_dir).await {
+                            Ok(()) => log::info!("Java 설정 완료: {}", instance_name),
+                            Err(e) => {
+                                log::warn!("Java 설정 실패 (계속 진행): {}", e);
+                                send_notification(app_handle, "Java 설정 실패", &e);
+                            }
+                        }
+                    }
+                }
+
                 emit_progress(app_handle, &display_name, 100, "완료");
                 tracker.mark_processed(&relative, modified_secs).ok();
                 send_notification(
