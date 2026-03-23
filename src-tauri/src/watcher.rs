@@ -42,7 +42,7 @@ pub fn start(
     let fs_tx = tx.clone();
     let fs_config = config.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Handle::current();
+        let rt = tokio::runtime::Runtime::new().expect("fs watcher runtime");
         let mut current_watcher: Option<RecommendedWatcher> = None;
 
         loop {
@@ -190,20 +190,41 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
         log::info!("새 모드팩 발견: {}", relative);
 
         let display_name = file_name.to_string();
+        let instance_name = path.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
         emit_progress(app_handle, &display_name, 0, "가져오는 중...");
 
-        match prismlauncher::import_modpack(&config.prismlauncher_exe, path, |current, total| {
-            let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
-            emit_progress(app_handle, &display_name, percent, "가져오는 중...");
-        }) {
+        // mrpack vs zip 분기
+        let import_result = if crate::mrpack::is_mrpack(path) {
+            let instances_dir = dirs::config_dir()
+                .ok_or("설정 경로를 찾을 수 없습니다".to_string())
+                .map(|d| d.join("PrismLauncher").join("instances"));
+            match instances_dir {
+                Ok(dir) => {
+                    let app_h = app_handle.clone();
+                    let dn = display_name.clone();
+                    crate::mrpack::install_mrpack(path, &dir, &instance_name, |current, total, fname| {
+                        let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
+                        emit_progress(&app_h, &dn, percent, &format!("다운로드: {}", fname));
+                    }).await
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            prismlauncher::import_modpack(&config.prismlauncher_exe, path, |current, total| {
+                let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
+                emit_progress(app_handle, &display_name, percent, "가져오는 중...");
+            })
+        };
+
+        match import_result {
             Ok(()) => {
                 emit_progress(app_handle, &display_name, 100, "Java 확인 중...");
 
                 // Java 자동 설정
-                let instance_name = path.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
                 let instances_dir = dirs::config_dir()
                     .map(|d| d.join("PrismLauncher").join("instances").join(&instance_name));
                 if let Some(inst_dir) = instances_dir {

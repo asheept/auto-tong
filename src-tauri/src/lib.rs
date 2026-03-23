@@ -1,5 +1,6 @@
 mod config;
 mod java;
+mod mrpack;
 mod prismlauncher;
 mod tracker;
 mod tray;
