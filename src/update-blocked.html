@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>업데이트 설치 차단됨</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', -apple-system, sans-serif;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      font-size: 14px;
+      padding: 24px;
+      user-select: none;
+    }
+    .icon { font-size: 28px; margin-bottom: 12px; }
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #fab387;
+      margin-bottom: 14px;
+    }
+    p {
+      font-size: 13px;
+      line-height: 1.6;
+      color: #a6adc8;
+      margin-bottom: 12px;
+    }
+    .steps {
+      background: #313244;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+    .step {
+      margin-bottom: 10px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #cdd6f4;
+    }
+    .step:last-child { margin-bottom: 0; }
+    .step-label {
+      font-weight: 600;
+      color: #89b4fa;
+      display: block;
+      margin-bottom: 2px;
+    }
+    .step-path {
+      color: #a6adc8;
+      font-size: 11px;
+    }
+    a {
+      color: #89b4fa;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    button {
+      padding: 8px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: #89b4fa;
+      color: #1e1e2e;
+    }
+    .btn-primary:hover { background: #74c7ec; }
+    .btn-secondary {
+      background: #45475a;
+      color: #cdd6f4;
+    }
+    .btn-secondary:hover { background: #585b70; }
+  </style>
+</head>
+<body>
+  <div class="icon">⚠️</div>
+  <h1>업데이트 설치가 차단되었습니다</h1>
+  <p>Windows 스마트 앱 컨트롤 또는 보안 설정이 업데이트를 차단하고 있을 수 있습니다.</p>
+
+  <div class="steps">
+    <div class="step">
+      <span class="step-label">방법 1: 스마트 앱 컨트롤 끄기</span>
+      <span class="step-path">설정 → 개인 정보 및 보안 → Windows 보안 → 앱 및 브라우저 컨트롤 → 스마트 앱 컨트롤 → 끄기</span>
+    </div>
+    <div class="step">
+      <span class="step-label">방법 2: GitHub에서 직접 다운로드</span>
+      <a id="link-github" href="#">https://github.com/asheept/auto-tong/releases/latest</a>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn-secondary" id="btn-close">닫기</button>
+  </div>
+
+  <script>
+    const { getCurrentWindow } = window.__TAURI__.window;
+    const GITHUB_URL = "https://github.com/asheept/auto-tong/releases/latest";
+
+    document.getElementById("link-github").addEventListener("click", (e) => {
+      e.preventDefault();
+      navigator.clipboard.writeText(GITHUB_URL).then(() => {
+        const el = document.getElementById("link-github");
+        const original = el.textContent;
+        el.textContent = "링크가 복사되었습니다!";
+        setTimeout(() => { el.textContent = original; }, 1500);
+      });
+    });
+
+    document.getElementById("btn-close").addEventListener("click", () => {
+      getCurrentWindow().close();
+    });
+  </script>
+</body>
+</html>

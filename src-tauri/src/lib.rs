@@ -7,9 +7,52 @@ mod tray;
 mod watcher;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_updater::UpdaterExt;
+
+/// 연속 업데이트 실패 횟수
+static UPDATE_FAIL_COUNT: AtomicU32 = AtomicU32::new(0);
+/// 이 횟수 이상 연속 실패하면 UI에 안내 표시
+const UPDATE_FAIL_THRESHOLD: u32 = 2;
+
+/// 업데이트 실패 시 스마트앱컨트롤/보안 차단 안내 윈도우 표시
+fn emit_update_blocked(app_handle: &tauri::AppHandle, error: &str) {
+    let count = UPDATE_FAIL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    log::error!("업데이트 설치 실패 ({}/{}): {}", count, UPDATE_FAIL_THRESHOLD, error);
+
+    if count >= UPDATE_FAIL_THRESHOLD {
+        log::warn!("업데이트 반복 실패 — Windows 보안 차단 의심");
+        show_update_blocked_window(app_handle);
+    }
+}
+
+/// 업데이트 차단 안내 윈도우 열기
+fn show_update_blocked_window(app_handle: &tauri::AppHandle) {
+    use tauri::WebviewWindowBuilder;
+    // 이미 열려있으면 포커스만
+    if let Some(win) = app_handle.get_webview_window("update-blocked") {
+        win.set_focus().ok();
+        return;
+    }
+    WebviewWindowBuilder::new(
+        app_handle,
+        "update-blocked",
+        tauri::WebviewUrl::App("update-blocked.html".into()),
+    )
+    .title("업데이트 설치 차단됨")
+    .inner_size(420.0, 340.0)
+    .resizable(false)
+    .center()
+    .build()
+    .ok();
+}
+
+/// 업데이트 성공 시 실패 카운터 초기화
+fn reset_update_fail_count() {
+    UPDATE_FAIL_COUNT.store(0, Ordering::Relaxed);
+}
 
 #[tauri::command]
 fn get_config() -> config::AppConfig {
@@ -89,6 +132,7 @@ async fn check_update(app_handle: tauri::AppHandle) -> Result<String, String> {
                 use tauri_plugin_notification::NotificationExt;
                 match update.download_and_install(|_, _| {}, || {}).await {
                     Ok(()) => {
+                        reset_update_fail_count();
                         log::info!("업데이트 설치 완료: {}", version_for_spawn);
                         app_handle.notification()
                             .builder()
@@ -98,7 +142,7 @@ async fn check_update(app_handle: tauri::AppHandle) -> Result<String, String> {
                             .ok();
                     }
                     Err(e) => {
-                        log::error!("업데이트 설치 실패: {}", e);
+                        emit_update_blocked(&app_handle, &e.to_string());
                     }
                 }
             });
@@ -193,6 +237,7 @@ pub fn run() {
 
                         match update.download_and_install(|_, _| {}, || {}).await {
                             Ok(()) => {
+                                reset_update_fail_count();
                                 log::info!("업데이트 설치 완료: {}", ver);
                                 handle.notification()
                                     .builder()
@@ -202,13 +247,7 @@ pub fn run() {
                                     .ok();
                             }
                             Err(e) => {
-                                log::error!("업데이트 설치 실패: {}", e);
-                                handle.notification()
-                                    .builder()
-                                    .title("Auto-Tong 업데이트 실패")
-                                    .body(&format!("업데이트 설치 중 오류: {}", e))
-                                    .show()
-                                    .ok();
+                                emit_update_blocked(&handle, &e.to_string());
                             }
                         }
                     }

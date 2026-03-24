@@ -24,14 +24,14 @@ where
     extract_zip(zip_path, &instances_dir, on_progress)
 }
 
-/// PrismLauncher instances 폴더 찾기 (플랫폼별)
-fn prism_instances_dir(exe_path: &str) -> Result<std::path::PathBuf, String> {
+/// PrismLauncher 데이터 루트 폴더 찾기 (표준/portable 지원)
+pub fn prism_data_dir(exe_path: &str) -> Result<std::path::PathBuf, String> {
     // 1. 표준 경로
     let standard = dirs::config_dir()
         .ok_or("설정 경로를 찾을 수 없습니다")?
-        .join("PrismLauncher")
-        .join("instances");
-    if standard.exists() {
+        .join("PrismLauncher");
+    if standard.join("instances").exists() {
+        log::info!("PrismLauncher 데이터 폴더 (표준): {}", standard.display());
         return Ok(standard);
     }
 
@@ -39,25 +39,31 @@ fn prism_instances_dir(exe_path: &str) -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = dirs::home_dir() {
-            let mac_path = home
-                .join("Library/Application Support/PrismLauncher/instances");
-            if mac_path.exists() {
+            let mac_path = home.join("Library/Application Support/PrismLauncher");
+            if mac_path.join("instances").exists() {
+                log::info!("PrismLauncher 데이터 폴더 (macOS): {}", mac_path.display());
                 return Ok(mac_path);
             }
         }
     }
 
-    // 3. 포터블 설치
+    // 3. 포터블 설치 (exe와 같은 폴더)
     let exe_parent = Path::new(exe_path).parent().ok_or("exe 경로 오류")?;
-    let portable_instances = exe_parent.join("instances");
-    if portable_instances.exists() {
-        return Ok(portable_instances);
+    if exe_parent.join("instances").exists() {
+        log::info!("PrismLauncher 데이터 폴더 (portable): {}", exe_parent.display());
+        return Ok(exe_parent.to_path_buf());
     }
 
     Err(format!(
-        "PrismLauncher instances 폴더를 찾을 수 없습니다: {}",
-        standard.display()
+        "PrismLauncher 데이터 폴더를 찾을 수 없습니다 (표준: {}, portable: {})",
+        standard.display(),
+        exe_parent.display()
     ))
+}
+
+/// PrismLauncher instances 폴더 찾기 (플랫폼별)
+pub fn prism_instances_dir(exe_path: &str) -> Result<std::path::PathBuf, String> {
+    prism_data_dir(exe_path).map(|d| d.join("instances"))
 }
 
 /// 파일이름에서 확장자만 제거하여 인스턴스 이름으로 사용

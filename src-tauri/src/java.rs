@@ -66,9 +66,19 @@ pub fn required_java_version(mc_version: &str) -> u32 {
 }
 
 /// PrismLauncher java 폴더에서 해당 버전의 java 경로를 찾기
-fn find_java_in_prism(java_version: u32) -> Option<PathBuf> {
-    let prism_java = dirs::config_dir()?.join("PrismLauncher").join("java");
+fn find_java_in_prism(java_version: u32, prism_data: Option<&Path>) -> Option<PathBuf> {
     let folder_name = format!("java-{}", java_version);
+
+    // prism_data가 제공되면 해당 경로 우선 탐색 (portable 지원)
+    if let Some(data_dir) = prism_data {
+        let java_bin = data_dir.join("java").join(&folder_name).join("bin").join(JAVA_BINARY);
+        if java_bin.exists() {
+            return Some(java_bin);
+        }
+    }
+
+    // 표준 경로 탐색
+    let prism_java = dirs::config_dir()?.join("PrismLauncher").join("java");
     let java_bin = prism_java.join(&folder_name).join("bin").join(JAVA_BINARY);
     if java_bin.exists() {
         Some(java_bin)
@@ -130,8 +140,8 @@ fn find_java_in_system(java_version: u32) -> Option<PathBuf> {
 }
 
 /// Java가 존재하는지 확인, 없으면 다운로드
-pub async fn ensure_java(java_version: u32) -> Result<PathBuf, String> {
-    if let Some(path) = find_java_in_prism(java_version) {
+pub async fn ensure_java(java_version: u32, prism_data: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = find_java_in_prism(java_version, prism_data) {
         log::info!("Java {} 발견 (PrismLauncher): {}", java_version, path.display());
         return Ok(path);
     }
@@ -142,15 +152,19 @@ pub async fn ensure_java(java_version: u32) -> Result<PathBuf, String> {
     }
 
     log::info!("Java {} 미설치 — Adoptium에서 다운로드합니다", java_version);
-    download_java(java_version).await
+    download_java(java_version, prism_data).await
 }
 
 /// Adoptium Temurin JRE 다운로드 및 설치
-async fn download_java(java_version: u32) -> Result<PathBuf, String> {
-    let prism_java = dirs::config_dir()
-        .ok_or("설정 경로를 찾을 수 없습니다")?
-        .join("PrismLauncher")
-        .join("java");
+async fn download_java(java_version: u32, prism_data: Option<&Path>) -> Result<PathBuf, String> {
+    let prism_java = match prism_data {
+        Some(data_dir) => data_dir.join("java"),
+        None => dirs::config_dir()
+            .ok_or("설정 경로를 찾을 수 없습니다")?
+            .join("PrismLauncher")
+            .join("java"),
+    };
+    log::info!("Java 설치 경로: {}", prism_java.display());
     fs::create_dir_all(&prism_java).map_err(|e| format!("java 폴더 생성 실패: {}", e))?;
 
     // macOS는 tar.gz, Windows는 zip
@@ -303,7 +317,7 @@ fn extract_tar_gz(
 }
 
 /// 인스턴스의 mmc-pack.json을 읽어서 Java를 확보하고 instance.cfg에 JavaPath를 설정
-pub async fn setup_java_for_instance(instance_dir: &Path) -> Result<(), String> {
+pub async fn setup_java_for_instance(instance_dir: &Path, prism_data: Option<&Path>) -> Result<(), String> {
     let mmc_pack_path = instance_dir.join("mmc-pack.json");
     if !mmc_pack_path.exists() {
         log::warn!("mmc-pack.json 없음: {}", instance_dir.display());
@@ -324,7 +338,7 @@ pub async fn setup_java_for_instance(instance_dir: &Path) -> Result<(), String> 
     let java_ver = required_java_version(&mc_version);
     log::info!("Minecraft {} → Java {} 필요", mc_version, java_ver);
 
-    let java_path = ensure_java(java_ver).await?;
+    let java_path = ensure_java(java_ver, prism_data).await?;
 
     // instance.cfg에 JavaPath 설정
     let cfg_path = instance_dir.join("instance.cfg");
@@ -338,12 +352,20 @@ pub async fn setup_java_for_instance(instance_dir: &Path) -> Result<(), String> 
         let java_path_str = java_path_str.replace('/', "\\");
 
         let mut has_java_path = false;
+        let mut has_override_java_location = false;
+        let mut has_automatic_java = false;
         let updated: Vec<String> = content
             .lines()
             .map(|line| {
                 if line.starts_with("JavaPath=") {
                     has_java_path = true;
                     format!("JavaPath={}", java_path_str)
+                } else if line.starts_with("OverrideJavaLocation=") {
+                    has_override_java_location = true;
+                    "OverrideJavaLocation=true".to_string()
+                } else if line.starts_with("AutomaticJava=") {
+                    has_automatic_java = true;
+                    "AutomaticJava=false".to_string()
                 } else {
                     line.to_string()
                 }
@@ -353,6 +375,14 @@ pub async fn setup_java_for_instance(instance_dir: &Path) -> Result<(), String> 
         let mut result = updated.join("\n");
         if !has_java_path {
             result.push_str(&format!("\nJavaPath={}", java_path_str));
+        }
+        if !has_override_java_location {
+            result.push('\n');
+            result.push_str("OverrideJavaLocation=true");
+        }
+        if !has_automatic_java {
+            result.push('\n');
+            result.push_str("AutomaticJava=false");
         }
 
         fs::write(&cfg_path, result)

@@ -16,17 +16,17 @@ pub enum WatcherCommand {
     UpdateConfig(AppConfig),
 }
 
-/// 파일이름에 @태그가 포함되어 있는지 확인
+/// 파일이름에 태그가 포함되어 있는지 확인 (@everyone, _everyone_ 둘 다 매칭)
 fn matches_tags(file_name: &str, tags: &[String]) -> bool {
     let name_lower = file_name.to_lowercase();
     tags.iter().any(|tag| {
         if tag.is_empty() {
             return false;
         }
-        // @를 이미 포함하고 있으면 그대로, 아니면 @를 붙여서 매칭
         let clean_tag = tag.trim_start_matches('@').to_lowercase();
-        let pattern = format!("@{}", clean_tag);
-        name_lower.contains(&pattern)
+        // @everyone 형태 또는 everyone 단독 형태 둘 다 매칭
+        let with_at = format!("@{}", clean_tag);
+        name_lower.contains(&with_at) || name_lower.contains(&clean_tag)
     })
 }
 
@@ -197,22 +197,25 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
 
         emit_progress(app_handle, &display_name, 0, "가져오는 중...");
 
+        // instances 폴더 찾기 (표준/portable 모두 지원)
+        let instances_dir = match prismlauncher::prism_instances_dir(&config.prismlauncher_exe) {
+            Ok(dir) => dir,
+            Err(e) => {
+                log::error!("PrismLauncher instances 폴더를 찾을 수 없습니다: {}", e);
+                send_notification(app_handle, "가져오기 실패", &e);
+                continue;
+            }
+        };
+        log::info!("instances 폴더: {}", instances_dir.display());
+
         // mrpack vs zip 분기
         let import_result = if crate::mrpack::is_mrpack(path) {
-            let instances_dir = dirs::config_dir()
-                .ok_or("설정 경로를 찾을 수 없습니다".to_string())
-                .map(|d| d.join("PrismLauncher").join("instances"));
-            match instances_dir {
-                Ok(dir) => {
-                    let app_h = app_handle.clone();
-                    let dn = display_name.clone();
-                    crate::mrpack::install_mrpack(path, &dir, &instance_name, |current, total, fname| {
-                        let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
-                        emit_progress(&app_h, &dn, percent, &format!("다운로드: {}", fname));
-                    }).await
-                }
-                Err(e) => Err(e),
-            }
+            let app_h = app_handle.clone();
+            let dn = display_name.clone();
+            crate::mrpack::install_mrpack(path, &instances_dir, &instance_name, |current, total, fname| {
+                let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
+                emit_progress(&app_h, &dn, percent, &format!("다운로드: {}", fname));
+            }).await
         } else {
             prismlauncher::import_modpack(&config.prismlauncher_exe, path, |current, total| {
                 let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
@@ -225,18 +228,18 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
                 emit_progress(app_handle, &display_name, 100, "Java 확인 중...");
 
                 // Java 자동 설정
-                let instances_dir = dirs::config_dir()
-                    .map(|d| d.join("PrismLauncher").join("instances").join(&instance_name));
-                if let Some(inst_dir) = instances_dir {
-                    if inst_dir.exists() {
-                        match crate::java::setup_java_for_instance(&inst_dir).await {
-                            Ok(()) => log::info!("Java 설정 완료: {}", instance_name),
-                            Err(e) => {
-                                log::warn!("Java 설정 실패 (계속 진행): {}", e);
-                                send_notification(app_handle, "Java 설정 실패", &e);
-                            }
+                let prism_data = instances_dir.parent();
+                let inst_dir = instances_dir.join(&instance_name);
+                if inst_dir.exists() {
+                    match crate::java::setup_java_for_instance(&inst_dir, prism_data).await {
+                        Ok(()) => log::info!("Java 설정 완료: {}", instance_name),
+                        Err(e) => {
+                            log::warn!("Java 설정 실패 (계속 진행): {}", e);
+                            send_notification(app_handle, "Java 설정 실패", &e);
                         }
                     }
+                } else {
+                    log::warn!("인스턴스 폴더가 존재하지 않습니다: {}", inst_dir.display());
                 }
 
                 emit_progress(app_handle, &display_name, 100, "완료");

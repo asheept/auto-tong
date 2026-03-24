@@ -1,11 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicklasmoeller/tauri-v2-schema/main/schema.json",
   "productName": "Auto-Tong",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "identifier": "com.auto-tong.client",
   "build": {
-    "frontendDist": "../src",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../src"
   },
   "app": {
     "withGlobalTauri": true,
