@@ -177,6 +177,19 @@ pub fn run() {
     init_logger();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri_plugin_notification::NotificationExt;
+            app.notification()
+                .builder()
+                .title("Auto-Tong")
+                .body("이미 실행 중입니다")
+                .show()
+                .ok();
+            // 기존 설정 창이 있으면 포커스
+            if let Some(win) = app.get_webview_window("settings") {
+                win.set_focus().ok();
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

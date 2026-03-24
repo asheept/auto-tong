@@ -316,7 +316,10 @@ fn generate_instance_cfg(
     };
 
     let cfg = format!(
-        "InstanceType=OneSix\n\
+        "[General]\n\
+         AutomaticJava=false\n\
+         InstanceType=OneSix\n\
+         OverrideJavaLocation=true\n\
          iconKey=default\n\
          name={}\n\
          ManagedPack=true\n\
