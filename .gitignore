@@ -4,3 +4,7 @@ src-tauri/.cargo/
 C:/autu-tong-target/
 *.log
 .claude/
+CLAUDE.md
+todo.md
+test-*
+.mailmap
