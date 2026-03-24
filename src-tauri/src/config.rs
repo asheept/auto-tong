@@ -14,8 +14,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            drive_sync_folder: "G:/공유 드라이브/잠뜰 TV 제작/Contents/통합".to_string(),
-            prismlauncher_exe: "C:/Users/h2art/AppData/Local/Programs/PrismLauncher/prismlauncher.exe".to_string(),
+            drive_sync_folder: "G:/공유 드라이브/Tong".to_string(),
+            prismlauncher_exe: String::new(),
             subscribed_tags: vec!["everyone".to_string()],
             poll_interval_secs: 60,
             autostart: true,
