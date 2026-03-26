@@ -181,6 +181,7 @@ where
     let cfg_path = instance_dir.join("instance.cfg");
     if cfg_path.exists() {
         if let Ok(content) = fs::read_to_string(&cfg_path) {
+            let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
             let updated = content
                 .lines()
                 .map(|line| {
@@ -191,7 +192,7 @@ where
                     }
                 })
                 .collect::<Vec<_>>()
-                .join("\n");
+                .join(eol);
             if let Err(e) = fs::write(&cfg_path, updated) {
                 log::warn!("instance.cfg 업데이트 실패: {}", e);
             }
@@ -270,8 +271,8 @@ fn has_java_child(parent_pid: u32) -> bool {
     }
 }
 
-/// PrismLauncher 새로고침 시도. 성공하면 true, java 대기 중이면 false.
-pub async fn try_refresh(exe_path: &str) -> bool {
+/// PrismLauncher 종료. 성공하면 true, 게임 실행 중이면 false.
+pub async fn kill_prism(exe_path: &str) -> bool {
     match get_pid_by_path(exe_path) {
         Some(pid) => {
             if has_java_child(pid) {
@@ -281,18 +282,29 @@ pub async fn try_refresh(exe_path: &str) -> bool {
                 );
                 false
             } else {
-                log::info!("PrismLauncher(PID:{}) 게임 미실행 — 재시작", pid);
+                log::info!("PrismLauncher(PID:{}) 게임 미실행 — 종료", pid);
                 kill_process(pid);
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                Command::new(exe_path).spawn().ok();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 true
             }
         }
-        None => {
-            Command::new(exe_path).spawn().ok();
-            log::info!("PrismLauncher 시작됨: {}", exe_path);
-            true
-        }
+        None => true, // 이미 꺼져있음
+    }
+}
+
+/// PrismLauncher 시작
+pub fn start_prism(exe_path: &str) {
+    Command::new(exe_path).spawn().ok();
+    log::info!("PrismLauncher 시작됨: {}", exe_path);
+}
+
+/// PrismLauncher 새로고침 시도. 성공하면 true, java 대기 중이면 false.
+pub async fn try_refresh(exe_path: &str) -> bool {
+    if kill_prism(exe_path).await {
+        start_prism(exe_path);
+        true
+    } else {
+        false
     }
 }
 

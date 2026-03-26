@@ -355,14 +355,20 @@ pub async fn setup_java_for_instance(instance_dir: &Path, prism_data: Option<&Pa
         let content = fs::read_to_string(&cfg_path)
             .map_err(|e| format!("instance.cfg 읽기 실패: {}", e))?;
 
+        // 원본 줄바꿈 보존 (PrismLauncher는 Windows에서 \r\n 사용)
+        let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+
         let java_path_str = java_path.to_string_lossy().to_string();
         // Windows에서는 백슬래시, 나머지는 그대로
         #[cfg(target_os = "windows")]
         let java_path_str = java_path_str.replace('/', "\\");
 
+        let java_ver_str = java_ver.to_string();
+
         let mut has_java_path = false;
-        let mut has_override_java_location = false;
-        let mut has_automatic_java = false;
+        let mut has_override = false;
+        let mut has_automatic = false;
+        let mut has_java_version = false;
         let updated: Vec<String> = content
             .lines()
             .map(|line| {
@@ -370,33 +376,41 @@ pub async fn setup_java_for_instance(instance_dir: &Path, prism_data: Option<&Pa
                     has_java_path = true;
                     format!("JavaPath={}", java_path_str)
                 } else if line.starts_with("OverrideJavaLocation=") {
-                    has_override_java_location = true;
+                    has_override = true;
                     "OverrideJavaLocation=true".to_string()
                 } else if line.starts_with("AutomaticJava=") {
-                    has_automatic_java = true;
+                    has_automatic = true;
                     "AutomaticJava=false".to_string()
+                } else if line.starts_with("JavaVersion=") {
+                    has_java_version = true;
+                    format!("JavaVersion={}", java_ver_str)
                 } else {
                     line.to_string()
                 }
             })
             .collect();
 
-        let mut result = updated.join("\n");
+        let mut result = updated.join(eol);
         if !has_java_path {
-            result.push_str(&format!("\nJavaPath={}", java_path_str));
+            result.push_str(eol);
+            result.push_str(&format!("JavaPath={}", java_path_str));
         }
-        if !has_override_java_location {
-            result.push('\n');
+        if !has_override {
+            result.push_str(eol);
             result.push_str("OverrideJavaLocation=true");
         }
-        if !has_automatic_java {
-            result.push('\n');
+        if !has_automatic {
+            result.push_str(eol);
             result.push_str("AutomaticJava=false");
+        }
+        if !has_java_version {
+            result.push_str(eol);
+            result.push_str(&format!("JavaVersion={}", java_ver_str));
         }
 
         fs::write(&cfg_path, result)
             .map_err(|e| format!("instance.cfg 쓰기 실패: {}", e))?;
-        log::info!("JavaPath 설정 완료: {}", java_path_str);
+        log::info!("JavaPath 설정 완료: {} (Java {})", java_path_str, java_ver);
     }
 
     Ok(())

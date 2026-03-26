@@ -97,10 +97,13 @@ pub fn start(
 
             scan_and_import(&current_config, &tracker, &app_handle, &refresh_pending).await;
 
+            // import 후 PrismLauncher 새로고침 필요 시:
+            // PrismLauncher가 instance.cfg를 메모리에 캐시해서 덮어쓰므로,
+            // 종료 후 다시 시작해야 올바른 Java 설정을 읽음
             if refresh_pending.load(Ordering::Relaxed) {
                 if prismlauncher::try_refresh(&current_config.prismlauncher_exe).await {
                     refresh_pending.store(false, Ordering::Relaxed);
-                    log::info!("PrismLauncher 새로고침 완료 — refresh 대기 해제");
+                    log::info!("PrismLauncher 새로고침 완료");
                 }
             }
 
@@ -227,7 +230,7 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
             Ok(()) => {
                 emit_progress(app_handle, &display_name, 100, "Java 확인 중...");
 
-                // Java 자동 설정
+                // Java 자동 설정 (PrismLauncher가 꺼진 상태에서 실행됨)
                 let prism_data = instances_dir.parent();
                 let inst_dir = instances_dir.join(&instance_name);
                 if inst_dir.exists() {
@@ -264,6 +267,7 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
             }
         }
     }
+
 }
 
 async fn is_file_stable(path: &Path) -> bool {
