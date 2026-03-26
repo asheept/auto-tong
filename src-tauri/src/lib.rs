@@ -54,6 +54,25 @@ fn reset_update_fail_count() {
     UPDATE_FAIL_COUNT.store(0, Ordering::Relaxed);
 }
 
+/// semver 비교: remote가 current보다 높으면 true
+fn is_newer_version(current: &str, remote: &str) -> bool {
+    let parse = |v: &str| -> Vec<u32> {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    };
+    let cur = parse(current);
+    let rem = parse(remote);
+    for i in 0..cur.len().max(rem.len()) {
+        let c = cur.get(i).copied().unwrap_or(0);
+        let r = rem.get(i).copied().unwrap_or(0);
+        if r > c { return true; }
+        if r < c { return false; }
+    }
+    false
+}
+
 #[tauri::command]
 fn get_config() -> config::AppConfig {
     config::load()
@@ -121,13 +140,44 @@ fn get_import_history(app_handle: tauri::AppHandle) -> Vec<String> {
 }
 
 #[tauri::command]
+async fn reimport(app_handle: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+    let cfg = config::load();
+    let base = std::path::Path::new(&cfg.drive_sync_folder);
+    let full_path = base.join(&relative_path);
+
+    // 원본 파일 존재 확인
+    if !full_path.exists() {
+        return Err(format!("원본 파일을 찾을 수 없습니다: {}", relative_path));
+    }
+
+    // tracker에서 이력 제거
+    if let Some(tracker) = app_handle.try_state::<Arc<tracker::Tracker>>() {
+        tracker.remove_imported(&relative_path)?;
+    }
+
+    // watcher에 CheckNow 전송하여 재스캔
+    if let Some(tx) = app_handle.try_state::<WatcherTx>() {
+        tx.0.send(watcher::WatcherCommand::CheckNow)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(format!("{} 재다운로드를 시작합니다", relative_path))
+}
+
+#[tauri::command]
 async fn check_update(app_handle: tauri::AppHandle) -> Result<String, String> {
     let updater = app_handle.updater().map_err(|e| e.to_string())?;
+    let current_version = env!("CARGO_PKG_VERSION");
     match updater.check().await {
         Ok(Some(update)) => {
+            if !is_newer_version(current_version, &update.version) {
+                log::info!("원격 버전 v{}이 현재 v{}보다 높지 않음 — 건너뜀", update.version, current_version);
+                return Ok("최신 버전입니다".to_string());
+            }
             let version_for_spawn = update.version.clone();
             let version_for_return = update.version.clone();
-            log::info!("업데이트 발견: {}", version_for_return);
+            log::info!("업데이트 발견: v{} → v{}", current_version, version_for_return);
             tauri::async_runtime::spawn(async move {
                 use tauri_plugin_notification::NotificationExt;
                 match update.download_and_install(|_, _| {}, || {}).await {
@@ -237,10 +287,15 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 use tauri_plugin_notification::NotificationExt;
+                let current_ver = env!("CARGO_PKG_VERSION");
                 match handle.updater().unwrap().check().await {
                     Ok(Some(update)) => {
+                        if !is_newer_version(current_ver, &update.version) {
+                            log::info!("원격 버전 v{}이 현재 v{}보다 높지 않음 — 건너뜀", update.version, current_ver);
+                            return;
+                        }
                         let ver = update.version.clone();
-                        log::info!("업데이트 발견: {}", ver);
+                        log::info!("업데이트 발견: v{} → v{}", current_ver, ver);
                         handle.notification()
                             .builder()
                             .title("Auto-Tong 업데이트")
@@ -279,6 +334,7 @@ pub fn run() {
             get_version,
             get_push_path,
             get_import_history,
+            reimport,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

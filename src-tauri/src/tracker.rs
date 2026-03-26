@@ -70,4 +70,14 @@ impl Tracker {
         list.sort();
         list
     }
+
+    /// 가져오기 이력에서 제거 (재다운로드용)
+    pub fn remove_imported(&self, relative_path: &str) -> Result<bool, String> {
+        let mut data = self.data.lock().unwrap();
+        let removed = data.imported.remove(relative_path).is_some();
+        data.failed.remove(relative_path);
+        let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
+        fs::write(&self.path, json).map_err(|e| e.to_string())?;
+        Ok(removed)
+    }
 }

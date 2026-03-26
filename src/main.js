@@ -26,6 +26,7 @@ async function loadHistory() {
     history.slice(-5).reverse().forEach((item) => {
       const li = document.createElement("li");
       li.textContent = item;
+      li.addEventListener("click", () => showReimportModal(item));
       list.appendChild(li);
     });
   }
@@ -140,6 +141,41 @@ $("#btn-update").addEventListener("click", async () => {
 
   btn.disabled = false;
   btn.textContent = "업데이트 확인";
+});
+
+// Reimport modal
+let reimportTarget = null;
+
+function showReimportModal(relativePath) {
+  reimportTarget = relativePath;
+  $("#reimport-modal-msg").textContent = `"${relativePath}" 을(를) 다시 가져오시겠습니까?`;
+  $("#reimport-modal").classList.remove("hidden");
+}
+
+$("#reimport-cancel").addEventListener("click", () => {
+  $("#reimport-modal").classList.add("hidden");
+  reimportTarget = null;
+});
+
+$("#reimport-confirm").addEventListener("click", async () => {
+  $("#reimport-modal").classList.add("hidden");
+  if (!reimportTarget) return;
+
+  try {
+    const result = await invoke("reimport", { relativePath: reimportTarget });
+    showToast(result);
+  } catch (err) {
+    showToast("실패: " + err);
+  }
+  reimportTarget = null;
+});
+
+// Close modal on overlay click
+$("#reimport-modal").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) {
+    $("#reimport-modal").classList.add("hidden");
+    reimportTarget = null;
+  }
 });
 
 // Initialize
