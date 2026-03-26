@@ -128,13 +128,21 @@ input[type="checkbox"] {
 .toast {
   margin-top: 10px;
   padding: 8px;
-  background: #a6e3a1;
-  color: #1e1e2e;
   border-radius: 6px;
   text-align: center;
   font-size: 13px;
   font-weight: 600;
   transition: opacity 0.3s;
+}
+
+.toast-success {
+  background: #a6e3a1;
+  color: #1e1e2e;
+}
+
+.toast-error {
+  background: #f38ba8;
+  color: #1e1e2e;
 }
 
 .toast.hidden {

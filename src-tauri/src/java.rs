@@ -207,7 +207,8 @@ async fn download_java(java_version: u32, prism_data: Option<&Path>) -> Result<P
     );
 
     let target_dir = prism_java.join(format!("java-{}", java_version));
-    fs::create_dir_all(&target_dir).ok();
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Java 디렉토리 생성 실패 {}: {}", target_dir.display(), e))?;
 
     #[cfg(target_os = "windows")]
     extract_zip_archive(&bytes, &target_dir, &prism_java, java_version)?;
@@ -273,13 +274,21 @@ fn extract_zip_archive(
             continue;
         }
 
+        // 경로 탐색 공격 차단: ".." 또는 절대경로 포함 시 건너뜀
+        if relative.contains("..") || std::path::Path::new(&relative).is_absolute() {
+            log::warn!("위험한 zip 엔트리 차단: {}", relative);
+            continue;
+        }
+
         let target = target_dir.join(&relative);
 
         if entry.is_dir() || relative.ends_with('/') {
-            fs::create_dir_all(&target).ok();
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("디렉토리 생성 실패 {}: {}", target.display(), e))?;
         } else {
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).ok();
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("디렉토리 생성 실패 {}: {}", parent.display(), e))?;
             }
             let mut outfile =
                 fs::File::create(&target).map_err(|e| format!("파일 생성 실패: {}", e))?;

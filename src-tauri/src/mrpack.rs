@@ -1,8 +1,9 @@
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
+use sha2::{Sha512, Digest};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,7 +84,8 @@ where
 
     let instance_dir = instances_dir.join(instance_name);
     let minecraft_dir = instance_dir.join(".minecraft");
-    fs::create_dir_all(&minecraft_dir).ok();
+    fs::create_dir_all(&minecraft_dir)
+        .map_err(|e| format!("인스턴스 디렉토리 생성 실패 {}: {}", minecraft_dir.display(), e))?;
 
     // 2. overrides 폴더 복사
     let override_prefixes = ["overrides/", "client-overrides/"];
@@ -104,13 +106,21 @@ where
             _ => continue,
         };
 
+        // 경로 탐색 공격 차단: ".." 또는 절대경로 포함 시 건너뜀
+        if relative.contains("..") || Path::new(&relative).is_absolute() {
+            log::warn!("위험한 zip 엔트리 차단: {}", relative);
+            continue;
+        }
+
         let target = minecraft_dir.join(&relative);
 
         if entry.is_dir() || relative.ends_with('/') {
-            fs::create_dir_all(&target).ok();
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("디렉토리 생성 실패 {}: {}", target.display(), e))?;
         } else {
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).ok();
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("디렉토리 생성 실패 {}: {}", parent.display(), e))?;
             }
             let mut outfile = fs::File::create(&target)
                 .map_err(|e| format!("파일 생성 실패 {}: {}", target.display(), e))?;
@@ -162,7 +172,8 @@ where
 
         let target_path = minecraft_dir.join(&mod_file.path);
         if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).ok();
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("모드 디렉토리 생성 실패 {}: {}", parent.display(), e))?;
         }
 
         // 이미 존재하고 크기가 같으면 건너뜀
@@ -194,6 +205,21 @@ where
             .bytes()
             .await
             .map_err(|e| format!("다운로드 읽기 실패 {}: {}", file_name, e))?;
+
+        // sha512 해시 검증
+        if let Some(expected_sha512) = &mod_file.hashes.sha512 {
+            let mut hasher = Sha512::new();
+            hasher.update(&bytes);
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != *expected_sha512 {
+                return Err(format!(
+                    "해시 불일치 {}: 예상 {}..., 실제 {}...",
+                    file_name,
+                    &expected_sha512[..16.min(expected_sha512.len())],
+                    &actual[..16]
+                ));
+            }
+        }
 
         fs::write(&target_path, &bytes)
             .map_err(|e| format!("파일 저장 실패 {}: {}", file_name, e))?;

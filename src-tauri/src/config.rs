@@ -14,7 +14,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            drive_sync_folder: "G:/공유 드라이브/Tong".to_string(),
+            drive_sync_folder: String::new(),
             prismlauncher_exe: String::new(),
             subscribed_tags: vec!["everyone".to_string()],
             poll_interval_secs: 60,
@@ -38,8 +38,20 @@ pub fn config_path() -> PathBuf {
 pub fn load() -> AppConfig {
     let path = config_path();
     if path.exists() {
-        let data = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&data).unwrap_or_default()
+        let data = match fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("설정 파일 읽기 실패: {} — 기본값 사용", e);
+                return AppConfig::default();
+            }
+        };
+        match serde_json::from_str(&data) {
+            Ok(config) => config,
+            Err(e) => {
+                log::error!("설정 파일 손상: {} — 기본값 사용", e);
+                AppConfig::default()
+            }
+        }
     } else {
         let config = AppConfig::default();
         save(&config).ok();
@@ -50,6 +62,10 @@ pub fn load() -> AppConfig {
 pub fn save(config: &AppConfig) -> Result<(), String> {
     let path = config_path();
     let data = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(&path, data).map_err(|e| e.to_string())?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &data)
+        .map_err(|e| format!("설정 임시 파일 쓰기 실패: {}", e))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|e| format!("설정 파일 저장 실패: {}", e))?;
     Ok(())
 }

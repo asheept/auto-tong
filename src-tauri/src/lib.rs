@@ -141,6 +141,11 @@ fn get_import_history(app_handle: tauri::AppHandle) -> Vec<String> {
 
 #[tauri::command]
 async fn reimport(app_handle: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+    // 경로 탐색 공격 차단
+    if relative_path.contains("..") || std::path::Path::new(&relative_path).is_absolute() {
+        return Err("잘못된 경로입니다".to_string());
+    }
+
     let cfg = config::load();
     let base = std::path::Path::new(&cfg.drive_sync_folder);
     let full_path = base.join(&relative_path);
@@ -288,7 +293,14 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 use tauri_plugin_notification::NotificationExt;
                 let current_ver = env!("CARGO_PKG_VERSION");
-                match handle.updater().unwrap().check().await {
+                let updater = match handle.updater() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        log::warn!("업데이터 초기화 실패: {}", e);
+                        return;
+                    }
+                };
+                match updater.check().await {
                     Ok(Some(update)) => {
                         if !is_newer_version(current_ver, &update.version) {
                             log::info!("원격 버전 v{}이 현재 v{}보다 높지 않음 — 건너뜀", update.version, current_ver);

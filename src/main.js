@@ -32,11 +32,14 @@ async function loadHistory() {
   }
 }
 
-function showToast(message) {
+let toastTimer = null;
+function showToast(message, isError = false) {
   const toast = $("#toast");
   toast.textContent = message;
-  toast.classList.remove("hidden");
-  setTimeout(() => toast.classList.add("hidden"), 2000);
+  toast.classList.remove("hidden", "toast-error", "toast-success");
+  toast.classList.add(isError ? "toast-error" : "toast-success");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.add("hidden"), 2000);
 }
 
 $("#btn-pick-drive").addEventListener("click", async () => {
@@ -79,17 +82,21 @@ $("#settings-form").addEventListener("submit", async (e) => {
     await invoke("save_config", { newConfig: config });
     showToast("저장되었습니다");
   } catch (err) {
-    showToast("저장 실패: " + err);
+    showToast("저장 실패: " + err, true);
   }
 });
 
 $("#btn-check-now").addEventListener("click", async () => {
+  const btn = $("#btn-check-now");
+  btn.disabled = true;
   try {
     const result = await invoke("check_now");
     showToast(result || "확인 완료");
-    loadHistory();
+    await loadHistory();
   } catch (err) {
-    showToast("오류: " + err);
+    showToast("오류: " + err, true);
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -111,7 +118,7 @@ listen("import-progress", (event) => {
   statusEl.textContent = status;
 
   if (percent >= 100) {
-    loadHistory();
+    loadHistory().catch((err) => console.error("이력 갱신 실패:", err));
     clearTimeout(progressTimer);
     progressTimer = setTimeout(() => {
       section.classList.add("hidden");
@@ -165,7 +172,7 @@ $("#reimport-confirm").addEventListener("click", async () => {
     const result = await invoke("reimport", { relativePath: reimportTarget });
     showToast(result);
   } catch (err) {
-    showToast("실패: " + err);
+    showToast("실패: " + err, true);
   }
   reimportTarget = null;
 });
@@ -179,5 +186,5 @@ $("#reimport-modal").addEventListener("click", (e) => {
 });
 
 // Initialize
-loadConfig();
-loadHistory();
+loadConfig().catch((err) => showToast("설정 로드 실패: " + err, true));
+loadHistory().catch((err) => showToast("이력 로드 실패: " + err, true));

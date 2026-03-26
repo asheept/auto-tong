@@ -119,7 +119,8 @@ where
 
     let total = archive.len();
     let instance_dir = instances_dir.join(&instance_name);
-    fs::create_dir_all(&instance_dir).ok();
+    fs::create_dir_all(&instance_dir)
+        .map_err(|e| format!("인스턴스 디렉토리 생성 실패 {}: {}", instance_dir.display(), e))?;
 
     for i in 0..total {
         let mut entry = archive
@@ -150,13 +151,22 @@ where
             continue;
         }
 
+        // 경로 탐색 공격 차단: ".." 또는 절대경로 포함 시 건너뜀
+        if relative_name.contains("..") || Path::new(&relative_name).is_absolute() {
+            log::warn!("위험한 zip 엔트리 차단: {}", relative_name);
+            on_progress(i + 1, total);
+            continue;
+        }
+
         let target = instance_dir.join(&relative_name);
 
         if entry.is_dir() || relative_name.ends_with('/') {
-            fs::create_dir_all(&target).ok();
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("디렉토리 생성 실패 {}: {}", target.display(), e))?;
         } else {
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).ok();
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("디렉토리 생성 실패 {}: {}", parent.display(), e))?;
             }
             let mut outfile = fs::File::create(&target)
                 .map_err(|e| format!("파일 생성 실패 {}: {}", target.display(), e))?;
@@ -182,7 +192,9 @@ where
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            fs::write(&cfg_path, updated).ok();
+            if let Err(e) = fs::write(&cfg_path, updated) {
+                log::warn!("instance.cfg 업데이트 실패: {}", e);
+            }
         }
     }
 
@@ -259,7 +271,7 @@ fn has_java_child(parent_pid: u32) -> bool {
 }
 
 /// PrismLauncher 새로고침 시도. 성공하면 true, java 대기 중이면 false.
-pub fn try_refresh(exe_path: &str) -> bool {
+pub async fn try_refresh(exe_path: &str) -> bool {
     match get_pid_by_path(exe_path) {
         Some(pid) => {
             if has_java_child(pid) {
@@ -271,7 +283,7 @@ pub fn try_refresh(exe_path: &str) -> bool {
             } else {
                 log::info!("PrismLauncher(PID:{}) 게임 미실행 — 재시작", pid);
                 kill_process(pid);
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 Command::new(exe_path).spawn().ok();
                 true
             }

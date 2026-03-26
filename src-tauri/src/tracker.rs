@@ -32,7 +32,13 @@ impl Tracker {
     }
 
     pub fn needs_import(&self, relative_path: &str, modified_secs: u64) -> bool {
-        let data = self.data.lock().unwrap();
+        let data = match self.data.lock() {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("Tracker 락 획득 실패: {}", e);
+                return true; // 안전한 방향: import 시도
+            }
+        };
         // 성공 이력 확인
         if let Some(&saved_time) = data.imported.get(relative_path) {
             if saved_time == modified_secs {
@@ -49,23 +55,35 @@ impl Tracker {
     }
 
     pub fn mark_processed(&self, relative_path: &str, modified_secs: u64) -> Result<(), String> {
-        let mut data = self.data.lock().unwrap();
-        data.imported.insert(relative_path.to_string(), modified_secs);
-        let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
-        fs::write(&self.path, json).map_err(|e| e.to_string())?;
+        let json = {
+            let mut data = self.data.lock()
+                .map_err(|e| format!("Tracker 락 획득 실패: {}", e))?;
+            data.imported.insert(relative_path.to_string(), modified_secs);
+            serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?
+        };
+        self.atomic_write(&json)?;
         Ok(())
     }
 
     pub fn mark_failed(&self, relative_path: &str, modified_secs: u64) -> Result<(), String> {
-        let mut data = self.data.lock().unwrap();
-        data.failed.insert(relative_path.to_string(), modified_secs);
-        let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
-        fs::write(&self.path, json).map_err(|e| e.to_string())?;
+        let json = {
+            let mut data = self.data.lock()
+                .map_err(|e| format!("Tracker 락 획득 실패: {}", e))?;
+            data.failed.insert(relative_path.to_string(), modified_secs);
+            serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?
+        };
+        self.atomic_write(&json)?;
         Ok(())
     }
 
     pub fn get_history(&self) -> Vec<String> {
-        let data = self.data.lock().unwrap();
+        let data = match self.data.lock() {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("Tracker 락 획득 실패: {}", e);
+                return vec![];
+            }
+        };
         let mut list: Vec<String> = data.imported.keys().cloned().collect();
         list.sort();
         list
@@ -73,11 +91,25 @@ impl Tracker {
 
     /// 가져오기 이력에서 제거 (재다운로드용)
     pub fn remove_imported(&self, relative_path: &str) -> Result<bool, String> {
-        let mut data = self.data.lock().unwrap();
-        let removed = data.imported.remove(relative_path).is_some();
-        data.failed.remove(relative_path);
-        let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
-        fs::write(&self.path, json).map_err(|e| e.to_string())?;
+        let (removed, json) = {
+            let mut data = self.data.lock()
+                .map_err(|e| format!("Tracker 락 획득 실패: {}", e))?;
+            let removed = data.imported.remove(relative_path).is_some();
+            data.failed.remove(relative_path);
+            let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
+            (removed, json)
+        };
+        self.atomic_write(&json)?;
         Ok(removed)
+    }
+
+    /// tmp 파일에 쓰고 rename하여 atomic write (크래시 시 데이터 손상 방지)
+    fn atomic_write(&self, content: &str) -> Result<(), String> {
+        let tmp_path = self.path.with_extension("json.tmp");
+        fs::write(&tmp_path, content)
+            .map_err(|e| format!("이력 임시 파일 쓰기 실패: {}", e))?;
+        fs::rename(&tmp_path, &self.path)
+            .map_err(|e| format!("이력 파일 저장 실패: {}", e))?;
+        Ok(())
     }
 }

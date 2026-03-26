@@ -98,7 +98,7 @@ pub fn start(
             scan_and_import(&current_config, &tracker, &app_handle, &refresh_pending).await;
 
             if refresh_pending.load(Ordering::Relaxed) {
-                if prismlauncher::try_refresh(&current_config.prismlauncher_exe) {
+                if prismlauncher::try_refresh(&current_config.prismlauncher_exe).await {
                     refresh_pending.store(false, Ordering::Relaxed);
                     log::info!("PrismLauncher 새로고침 완료 — refresh 대기 해제");
                 }

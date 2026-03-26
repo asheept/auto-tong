@@ -49,12 +49,14 @@ pub fn create_tray(
                 }
                 "copy_push_path" => {
                     let config = crate::config::load();
-                    let path = format!("{}", config.drive_sync_folder);
-                    // Copy to clipboard using Windows command
-                    std::process::Command::new("cmd")
-                        .args(["/C", &format!("echo {}| clip", path)])
-                        .spawn()
-                        .ok();
+                    match arboard::Clipboard::new() {
+                        Ok(mut clipboard) => {
+                            if let Err(e) = clipboard.set_text(&config.drive_sync_folder) {
+                                log::error!("클립보드 복사 실패: {}", e);
+                            }
+                        }
+                        Err(e) => log::error!("클립보드 초기화 실패: {}", e),
+                    }
                 }
                 "settings" => {
                     open_settings_window(app_handle);
