@@ -214,7 +214,7 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
         // zip 파일 형식 검증 (mrpack은 별도 형식이므로 검증 불필요)
         if !crate::mrpack::is_mrpack(path) {
             if let Err(e) = prismlauncher::validate_zip(path) {
-                emit_progress(app_handle, &display_name, 0, "지원되지 않는 형식");
+                emit_progress(app_handle, &display_name, 0, "실패");
                 tracker.mark_failed(&relative, modified_secs).ok();
                 send_notification(
                     app_handle,
