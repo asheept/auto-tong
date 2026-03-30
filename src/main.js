@@ -25,8 +25,16 @@ async function loadHistory() {
     empty.style.display = "none";
     history.slice(-5).reverse().forEach((item) => {
       const li = document.createElement("li");
-      li.textContent = item;
-      li.addEventListener("click", () => showReimportModal(item));
+      const isFailed = item.status === "failed";
+
+      if (isFailed) {
+        li.classList.add("history-failed");
+        li.innerHTML = `<span class="history-x">X</span> ${item.path}`;
+      } else {
+        li.textContent = item.path;
+      }
+
+      li.addEventListener("click", () => showReimportModal(item.path));
       list.appendChild(li);
     });
   }

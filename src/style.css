@@ -229,6 +229,19 @@ hr {
   color: #cdd6f4;
 }
 
+.history-section li.history-failed {
+  color: #f38ba8;
+}
+
+.history-section li.history-failed:hover {
+  color: #f38ba8;
+}
+
+.history-x {
+  font-weight: 700;
+  margin-right: 4px;
+}
+
 /* Modal */
 .modal-overlay {
   position: fixed;

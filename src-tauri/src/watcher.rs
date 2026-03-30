@@ -211,6 +211,21 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
         };
         log::info!("instances 폴더: {}", instances_dir.display());
 
+        // zip 파일 형식 검증 (mrpack은 별도 형식이므로 검증 불필요)
+        if !crate::mrpack::is_mrpack(path) {
+            if let Err(e) = prismlauncher::validate_zip(path) {
+                emit_progress(app_handle, &display_name, 0, "지원되지 않는 형식");
+                tracker.mark_failed(&relative, modified_secs).ok();
+                send_notification(
+                    app_handle,
+                    "모드팩 가져오기 실패",
+                    &format!("{}: {}", display_name, e),
+                );
+                log::error!("zip 검증 실패: {} - {}", relative, e);
+                continue;
+            }
+        }
+
         // mrpack vs zip 분기
         let import_result = if crate::mrpack::is_mrpack(path) {
             let app_h = app_handle.clone();

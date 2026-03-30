@@ -4,6 +4,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryItem {
+    pub path: String,
+    pub status: String,
+    pub timestamp: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProcessedFiles {
     pub imported: HashMap<String, u64>,
@@ -76,7 +83,8 @@ impl Tracker {
         Ok(())
     }
 
-    pub fn get_history(&self) -> Vec<String> {
+    /// 성공/실패 상태를 포함한 이력 반환
+    pub fn get_history_with_status(&self) -> Vec<HistoryItem> {
         let data = match self.data.lock() {
             Ok(d) => d,
             Err(e) => {
@@ -84,9 +92,23 @@ impl Tracker {
                 return vec![];
             }
         };
-        let mut list: Vec<String> = data.imported.keys().cloned().collect();
-        list.sort();
-        list
+        let mut items: Vec<HistoryItem> = Vec::new();
+        for (path, &ts) in &data.imported {
+            items.push(HistoryItem {
+                path: path.clone(),
+                status: "ok".to_string(),
+                timestamp: ts,
+            });
+        }
+        for (path, &ts) in &data.failed {
+            items.push(HistoryItem {
+                path: path.clone(),
+                status: "failed".to_string(),
+                timestamp: ts,
+            });
+        }
+        items.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        items
     }
 
     /// 가져오기 이력에서 제거 (재다운로드용)

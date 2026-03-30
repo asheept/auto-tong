@@ -131,9 +131,9 @@ fn get_push_path() -> String {
 }
 
 #[tauri::command]
-fn get_import_history(app_handle: tauri::AppHandle) -> Vec<String> {
+fn get_import_history(app_handle: tauri::AppHandle) -> Vec<tracker::HistoryItem> {
     if let Some(tracker) = app_handle.try_state::<Arc<tracker::Tracker>>() {
-        tracker.get_history()
+        tracker.get_history_with_status()
     } else {
         vec![]
     }

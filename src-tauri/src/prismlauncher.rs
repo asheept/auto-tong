@@ -16,6 +16,96 @@ fn silent_command(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// zip 파일이 유효한 PrismLauncher 인스턴스인지 검증
+/// 바닐라 런처의 .minecraft 폴더를 그대로 압축한 경우를 감지
+pub fn validate_zip(zip_path: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path)
+        .map_err(|e| format!("zip 파일 열기 실패: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("zip 읽기 실패: {}", e))?;
+
+    let mut has_instance_cfg = false;
+    let mut has_mmc_pack = false;
+    let mut vanilla_launcher_files: Vec<&'static str> = Vec::new();
+
+    // 바닐라 런처 파일 목록 (이것들이 최상위에 있으면 .minecraft 폴더를 통째로 압축한 것)
+    const VANILLA_MARKERS: &[&str] = &[
+        "launcher_profiles.json",
+        "launcher_settings.json",
+        "launcher_accounts.json",
+        "launcher_accounts_microsoft_store.json",
+    ];
+
+    const VANILLA_DIRS: &[&str] = &[
+        "assets/objects/",
+        "libraries/",
+        "versions/",
+    ];
+
+    for i in 0..archive.len() {
+        let entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.name().replace('\\', "/");
+
+        // instance.cfg / mmc-pack.json 존재 여부 (래핑된 구조 포함)
+        if name == "instance.cfg" || name.ends_with("/instance.cfg") {
+            has_instance_cfg = true;
+        }
+        if name == "mmc-pack.json" || name.ends_with("/mmc-pack.json") {
+            has_mmc_pack = true;
+        }
+
+        // 바닐라 런처 파일 감지
+        for &marker in VANILLA_MARKERS {
+            if name == marker {
+                vanilla_launcher_files.push(marker);
+            }
+        }
+    }
+
+    // instance.cfg 또는 mmc-pack.json이 있으면 유효
+    if has_instance_cfg || has_mmc_pack {
+        return Ok(());
+    }
+
+    // 바닐라 런처 파일이 있으면 → .minecraft 폴더를 압축한 것
+    if !vanilla_launcher_files.is_empty() {
+        // 추가로 assets/objects/ 또는 libraries/ 디렉토리 존재 확인
+        let mut has_vanilla_dirs = false;
+        for i in 0..archive.len() {
+            let entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let name = entry.name().replace('\\', "/");
+            for &dir in VANILLA_DIRS {
+                if name.starts_with(dir) {
+                    has_vanilla_dirs = true;
+                    break;
+                }
+            }
+            if has_vanilla_dirs {
+                break;
+            }
+        }
+
+        if has_vanilla_dirs {
+            return Err(
+                "지원되지 않는 파일 형식입니다. 이 zip은 바닐라 런처의 .minecraft 폴더를 \
+                 그대로 압축한 파일입니다. PrismLauncher 인스턴스 형식(instance.cfg 포함)으로 \
+                 내보낸 파일만 가져올 수 있습니다."
+                    .to_string(),
+            );
+        }
+    }
+
+    // instance.cfg도 없고 바닐라 마커도 없는 경우 → 일단 통과
+    // (mods만 묶은 zip 등 다양한 형태가 있을 수 있음)
+    Ok(())
+}
+
 pub fn import_modpack<F>(exe_path: &str, zip_path: &Path, on_progress: F) -> Result<(), String>
 where
     F: Fn(usize, usize),
