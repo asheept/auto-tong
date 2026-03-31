@@ -29,7 +29,11 @@ async function loadHistory() {
 
       if (isFailed) {
         li.classList.add("history-failed");
-        li.innerHTML = `<span class="history-x">X</span> ${item.path}`;
+        const xSpan = document.createElement("span");
+        xSpan.className = "history-x";
+        xSpan.textContent = "X";
+        li.appendChild(xSpan);
+        li.appendChild(document.createTextNode(" " + item.path));
       } else {
         li.textContent = item.path;
       }
@@ -132,6 +136,7 @@ listen("import-progress", (event) => {
       section.classList.add("hidden");
     }, 3000);
   } else if (status === "실패") {
+    loadHistory().catch((err) => console.error("이력 갱신 실패:", err));
     clearTimeout(progressTimer);
     progressTimer = setTimeout(() => {
       section.classList.add("hidden");

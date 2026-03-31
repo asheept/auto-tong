@@ -66,6 +66,7 @@ impl Tracker {
             let mut data = self.data.lock()
                 .map_err(|e| format!("Tracker 락 획득 실패: {}", e))?;
             data.imported.insert(relative_path.to_string(), modified_secs);
+            data.failed.remove(relative_path);
             serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?
         };
         self.atomic_write(&json)?;

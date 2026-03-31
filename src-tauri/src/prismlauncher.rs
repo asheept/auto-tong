@@ -58,11 +58,12 @@ pub fn detect_zip_type(zip_path: &Path) -> Result<ZipType, String> {
             has_mmc_pack = true;
         }
         for &marker in VANILLA_MARKERS {
-            if name == marker {
+            // 최상위 또는 1단계 래핑 (.minecraft/launcher_profiles.json 등)
+            if name == marker || name.ends_with(&format!("/{}", marker)) {
                 has_vanilla_marker = true;
             }
         }
-        if name.starts_with("versions/") {
+        if name.starts_with("versions/") || name.contains("/versions/") {
             has_versions_dir = true;
         }
     }
@@ -103,8 +104,12 @@ where
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("zip 읽기 실패: {}", e))?;
 
-    // 1. versions/ 디렉토리에서 MC 버전 + 모드로더 파싱
-    let loader_info = detect_loader_from_zip(&mut archive)?;
+    // 1. 래핑 구조 감지 (예: .minecraft/mods/... 형태)
+    let root_prefix = detect_vanilla_root_prefix(&mut archive);
+    log::info!("바닐라 zip 루트 프리픽스: {:?}", root_prefix);
+
+    // 2. versions/ 디렉토리에서 MC 버전 + 모드로더 파싱
+    let loader_info = detect_loader_from_zip(&mut archive, root_prefix.as_deref())?;
     log::info!(
         "바닐라 zip 감지: MC {}, 로더: {:?}",
         loader_info.mc_version,
@@ -112,11 +117,20 @@ where
     );
 
     let instance_dir = instances_dir.join(&instance_name);
+
+    // 이미 존재하는 인스턴스의 instance.cfg가 있으면 덮어쓰기 방지
+    if instance_dir.join("instance.cfg").exists() {
+        return Err(format!(
+            "인스턴스 '{}'이(가) 이미 존재합니다. 재설치하려면 이력에서 재다운로드를 사용하세요.",
+            instance_name
+        ));
+    }
+
     let minecraft_dir = instance_dir.join(".minecraft");
     fs::create_dir_all(&minecraft_dir)
         .map_err(|e| format!("디렉토리 생성 실패: {}", e))?;
 
-    // 2. 게임 데이터만 선별 추출 → .minecraft/ 에 배치
+    // 3. 게임 데이터만 선별 추출 → .minecraft/ 에 배치
     let total = archive.len();
     for i in 0..total {
         let mut entry = archive
@@ -129,20 +143,38 @@ where
             continue;
         }
 
+        // 루트 프리픽스 제거 (예: ".minecraft/mods/x.jar" → "mods/x.jar")
+        let stripped = if let Some(ref prefix) = root_prefix {
+            match raw_name.strip_prefix(prefix.as_str()) {
+                Some(rest) => rest.to_string(),
+                None => {
+                    on_progress(i + 1, total);
+                    continue;
+                }
+            }
+        } else {
+            raw_name.clone()
+        };
+
+        if stripped.is_empty() {
+            on_progress(i + 1, total);
+            continue;
+        }
+
         // 스킵 대상: 런처 파일, 런타임 디렉토리
-        if should_skip_vanilla_entry(&raw_name) {
+        if should_skip_vanilla_entry(&stripped) {
             on_progress(i + 1, total);
             continue;
         }
 
         // 경로 탐색 공격 차단
-        if raw_name.contains("..") || Path::new(&raw_name).is_absolute() {
-            log::warn!("위험한 zip 엔트리 차단: {}", raw_name);
+        if stripped.contains("..") || Path::new(&stripped).is_absolute() {
+            log::warn!("위험한 zip 엔트리 차단: {}", stripped);
             on_progress(i + 1, total);
             continue;
         }
 
-        let target = minecraft_dir.join(&raw_name);
+        let target = minecraft_dir.join(&stripped);
 
         if entry.is_dir() || raw_name.ends_with('/') {
             fs::create_dir_all(&target)
@@ -205,6 +237,37 @@ fn should_skip_vanilla_entry(name: &str) -> bool {
     false
 }
 
+/// 바닐라 zip의 루트 프리픽스 감지 (예: ".minecraft/" 또는 "폴더명/.minecraft/")
+fn detect_vanilla_root_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<String> {
+    const VANILLA_MARKERS: &[&str] = &[
+        "launcher_profiles.json",
+        "launcher_settings.json",
+    ];
+
+    for i in 0..archive.len() {
+        let entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.name().replace('\\', "/");
+
+        for &marker in VANILLA_MARKERS {
+            // 최상위에 있으면 프리픽스 없음
+            if name == marker {
+                return None;
+            }
+            // "something/launcher_profiles.json" → 프리픽스 = "something/"
+            if name.ends_with(marker) {
+                let prefix = &name[..name.len() - marker.len()];
+                if !prefix.is_empty() {
+                    return Some(prefix.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 모드로더 종류
 #[derive(Debug, Clone)]
 pub enum ModLoader {
@@ -223,8 +286,18 @@ pub struct LoaderInfo {
 }
 
 /// versions/ 디렉토리명에서 MC 버전 + 모드로더 파싱
-fn detect_loader_from_zip(archive: &mut zip::ZipArchive<fs::File>) -> Result<LoaderInfo, String> {
+fn detect_loader_from_zip(
+    archive: &mut zip::ZipArchive<fs::File>,
+    root_prefix: Option<&str>,
+) -> Result<LoaderInfo, String> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
     let mut version_dirs: Vec<String> = Vec::new();
+
+    let versions_prefix = match root_prefix {
+        Some(prefix) => format!("{}versions/", prefix),
+        None => "versions/".to_string(),
+    };
 
     for i in 0..archive.len() {
         let entry = match archive.by_index(i) {
@@ -232,13 +305,12 @@ fn detect_loader_from_zip(archive: &mut zip::ZipArchive<fs::File>) -> Result<Loa
             Err(_) => continue,
         };
         let name = entry.name().replace('\\', "/");
-        // versions/X.Y.Z/ 또는 versions/1.16.5-forge-36.2.33/ 형태
-        if let Some(rest) = name.strip_prefix("versions/") {
+        if let Some(rest) = name.strip_prefix(&versions_prefix) {
             if let Some(dir_name) = rest.split('/').next() {
                 if !dir_name.is_empty()
                     && dir_name != "jre_manifest.json"
                     && dir_name != "version_manifest_v2.json"
-                    && !version_dirs.contains(&dir_name.to_string())
+                    && seen.insert(dir_name.to_string())
                 {
                     version_dirs.push(dir_name.to_string());
                 }
@@ -254,20 +326,19 @@ fn detect_loader_from_zip(archive: &mut zip::ZipArchive<fs::File>) -> Result<Loa
 
     // 모드로더 버전 디렉토리 우선 탐색
     for dir in &version_dirs {
-        // Forge: "1.16.5-forge-36.2.33"
-        if let Some(info) = parse_forge_version(dir) {
-            return Ok(info);
-        }
-        // Fabric: "fabric-loader-0.16.0-1.21.1"
-        if let Some(info) = parse_fabric_version(dir) {
-            return Ok(info);
-        }
-        // NeoForge: "neoforge-21.1.1" 또는 "1.20.4-neoforge-20.4.xxx"
-        if let Some(info) = parse_neoforge_version(dir) {
-            return Ok(info);
-        }
-        // Quilt: "quilt-loader-0.26.0-1.21.1"
-        if let Some(info) = parse_quilt_version(dir) {
+        if let Some(mut info) = parse_forge_version(dir)
+            .or_else(|| parse_fabric_version(dir))
+            .or_else(|| parse_neoforge_version(dir))
+            .or_else(|| parse_quilt_version(dir))
+        {
+            // mc_version이 비어있으면 (예: "neoforge-21.1.1") version_dirs에서 보충
+            if info.mc_version.is_empty() {
+                info.mc_version = version_dirs
+                    .iter()
+                    .find(|v| is_release_version(v))
+                    .cloned()
+                    .unwrap_or_default();
+            }
             return Ok(info);
         }
     }
@@ -286,17 +357,19 @@ fn detect_loader_from_zip(archive: &mut zip::ZipArchive<fs::File>) -> Result<Loa
     })
 }
 
-/// "1.16.5-forge-36.2.33" → LoaderInfo
+/// "1.16.5-forge-36.2.33" 또는 "1.16.5-rc1-forge-36.2.33" → LoaderInfo
 fn parse_forge_version(dir: &str) -> Option<LoaderInfo> {
-    // 패턴: {mc_version}-forge-{forge_version}
-    let parts: Vec<&str> = dir.splitn(3, '-').collect();
-    if parts.len() == 3 && parts[1] == "forge" {
-        return Some(LoaderInfo {
-            mc_version: parts[0].to_string(),
-            loader: ModLoader::Forge(parts[2].to_string()),
-        });
+    let pos = dir.find("-forge-")?;
+    let mc = &dir[..pos];
+    let forge_ver = &dir[pos + "-forge-".len()..];
+    if !mc.is_empty() && !forge_ver.is_empty() {
+        Some(LoaderInfo {
+            mc_version: mc.to_string(),
+            loader: ModLoader::Forge(forge_ver.to_string()),
+        })
+    } else {
+        None
     }
-    None
 }
 
 /// "fabric-loader-0.16.0-1.21.1" → LoaderInfo
@@ -318,21 +391,25 @@ fn parse_fabric_version(dir: &str) -> Option<LoaderInfo> {
 
 /// "neoforge-21.1.1" 또는 "1.20.4-neoforge-20.4.xxx" → LoaderInfo
 fn parse_neoforge_version(dir: &str) -> Option<LoaderInfo> {
-    if let Some(rest) = dir.strip_prefix("neoforge-") {
-        // "neoforge-21.1.1" — MC 버전은 NeoForge 메이저에서 추론 필요
-        // NeoForge 21.x = MC 1.21.x 등. 정확한 매핑은 어려우므로 버전만 저장
-        return Some(LoaderInfo {
-            mc_version: String::new(), // 아래에서 fallback 처리
-            loader: ModLoader::NeoForge(rest.to_string()),
-        });
+    // "1.20.4-neoforge-20.4.xxx" 형태 우선
+    if let Some(pos) = dir.find("-neoforge-") {
+        let mc = &dir[..pos];
+        let neo_ver = &dir[pos + "-neoforge-".len()..];
+        if !mc.is_empty() && !neo_ver.is_empty() {
+            return Some(LoaderInfo {
+                mc_version: mc.to_string(),
+                loader: ModLoader::NeoForge(neo_ver.to_string()),
+            });
+        }
     }
-    // "1.20.4-neoforge-20.4.xxx"
-    let parts: Vec<&str> = dir.splitn(3, '-').collect();
-    if parts.len() == 3 && parts[1] == "neoforge" {
-        return Some(LoaderInfo {
-            mc_version: parts[0].to_string(),
-            loader: ModLoader::NeoForge(parts[2].to_string()),
-        });
+    // "neoforge-21.1.1" 형태 (MC 버전은 detect_loader_from_zip에서 fallback)
+    if let Some(rest) = dir.strip_prefix("neoforge-") {
+        if !rest.is_empty() {
+            return Some(LoaderInfo {
+                mc_version: String::new(),
+                loader: ModLoader::NeoForge(rest.to_string()),
+            });
+        }
     }
     None
 }
@@ -510,6 +587,7 @@ pub fn prism_instances_dir(exe_path: &str) -> Result<std::path::PathBuf, String>
 }
 
 /// 파일이름에서 확장자만 제거하여 인스턴스 이름으로 사용
+/// 개행/제어 문자를 제거하여 instance.cfg 인젝션 방지
 fn instance_name_from_zip(zip_path: &Path) -> String {
     zip_path
         .file_stem()
@@ -517,7 +595,7 @@ fn instance_name_from_zip(zip_path: &Path) -> String {
         .to_string_lossy()
         .trim()
         .trim_end_matches(&['.', ' '][..])
-        .to_string()
+        .replace(&['\n', '\r', '='][..], "_")
 }
 
 fn extract_zip<F>(zip_path: &Path, instances_dir: &Path, on_progress: F) -> Result<(), String>
