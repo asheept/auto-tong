@@ -211,22 +211,7 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
         };
         log::info!("instances 폴더: {}", instances_dir.display());
 
-        // zip 파일 형식 검증 (mrpack은 별도 형식이므로 검증 불필요)
-        if !crate::mrpack::is_mrpack(path) {
-            if let Err(e) = prismlauncher::validate_zip(path) {
-                emit_progress(app_handle, &display_name, 0, "실패");
-                tracker.mark_failed(&relative, modified_secs).ok();
-                send_notification(
-                    app_handle,
-                    "모드팩 가져오기 실패",
-                    &format!("{}: {}", display_name, e),
-                );
-                log::error!("zip 검증 실패: {} - {}", relative, e);
-                continue;
-            }
-        }
-
-        // mrpack vs zip 분기
+        // mrpack vs zip (PrismInstance / Vanilla) 분기
         let import_result = if crate::mrpack::is_mrpack(path) {
             let app_h = app_handle.clone();
             let dn = display_name.clone();
@@ -235,10 +220,24 @@ async fn scan_and_import(config: &AppConfig, tracker: &Tracker, app_handle: &tau
                 emit_progress(&app_h, &dn, percent, &format!("다운로드: {}", fname));
             }).await
         } else {
-            prismlauncher::import_modpack(&config.prismlauncher_exe, path, |current, total| {
-                let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
-                emit_progress(app_handle, &display_name, percent, "가져오는 중...");
-            })
+            // zip 형식 판별: PrismInstance vs VanillaDotMinecraft
+            match prismlauncher::detect_zip_type(path) {
+                Ok(prismlauncher::ZipType::VanillaDotMinecraft) => {
+                    log::info!("바닐라 .minecraft zip 감지 → 변환 임포트: {}", relative);
+                    emit_progress(app_handle, &display_name, 0, "변환 중...");
+                    prismlauncher::import_vanilla_zip(path, &instances_dir, |current, total| {
+                        let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
+                        emit_progress(app_handle, &display_name, percent, "변환 중...");
+                    })
+                }
+                Ok(_) => {
+                    prismlauncher::import_modpack(&config.prismlauncher_exe, path, |current, total| {
+                        let percent = if total > 0 { (current * 100 / total) as u32 } else { 0 };
+                        emit_progress(app_handle, &display_name, percent, "가져오는 중...");
+                    })
+                }
+                Err(e) => Err(e),
+            }
         };
 
         match import_result {

@@ -16,9 +16,18 @@ fn silent_command(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// zip 파일이 유효한 PrismLauncher 인스턴스인지 검증
-/// 바닐라 런처의 .minecraft 폴더를 그대로 압축한 경우를 감지
-pub fn validate_zip(zip_path: &Path) -> Result<(), String> {
+/// zip 형식 판별 결과
+pub enum ZipType {
+    /// PrismLauncher 인스턴스 (instance.cfg / mmc-pack.json 포함)
+    PrismInstance,
+    /// 바닐라 런처 .minecraft 폴더를 압축한 zip
+    VanillaDotMinecraft,
+    /// 알 수 없는 형식 (mods만 묶은 zip 등) — PrismInstance로 취급
+    Unknown,
+}
+
+/// zip 파일의 형식을 판별
+pub fn detect_zip_type(zip_path: &Path) -> Result<ZipType, String> {
     let file = fs::File::open(zip_path)
         .map_err(|e| format!("zip 파일 열기 실패: {}", e))?;
     let mut archive = zip::ZipArchive::new(file)
@@ -26,20 +35,13 @@ pub fn validate_zip(zip_path: &Path) -> Result<(), String> {
 
     let mut has_instance_cfg = false;
     let mut has_mmc_pack = false;
-    let mut vanilla_launcher_files: Vec<&'static str> = Vec::new();
+    let mut has_vanilla_marker = false;
+    let mut has_versions_dir = false;
 
-    // 바닐라 런처 파일 목록 (이것들이 최상위에 있으면 .minecraft 폴더를 통째로 압축한 것)
     const VANILLA_MARKERS: &[&str] = &[
         "launcher_profiles.json",
         "launcher_settings.json",
         "launcher_accounts.json",
-        "launcher_accounts_microsoft_store.json",
-    ];
-
-    const VANILLA_DIRS: &[&str] = &[
-        "assets/objects/",
-        "libraries/",
-        "versions/",
     ];
 
     for i in 0..archive.len() {
@@ -49,61 +51,29 @@ pub fn validate_zip(zip_path: &Path) -> Result<(), String> {
         };
         let name = entry.name().replace('\\', "/");
 
-        // instance.cfg / mmc-pack.json 존재 여부 (래핑된 구조 포함)
         if name == "instance.cfg" || name.ends_with("/instance.cfg") {
             has_instance_cfg = true;
         }
         if name == "mmc-pack.json" || name.ends_with("/mmc-pack.json") {
             has_mmc_pack = true;
         }
-
-        // 바닐라 런처 파일 감지
         for &marker in VANILLA_MARKERS {
             if name == marker {
-                vanilla_launcher_files.push(marker);
+                has_vanilla_marker = true;
             }
+        }
+        if name.starts_with("versions/") {
+            has_versions_dir = true;
         }
     }
 
-    // instance.cfg 또는 mmc-pack.json이 있으면 유효
     if has_instance_cfg || has_mmc_pack {
-        return Ok(());
+        Ok(ZipType::PrismInstance)
+    } else if has_vanilla_marker && has_versions_dir {
+        Ok(ZipType::VanillaDotMinecraft)
+    } else {
+        Ok(ZipType::Unknown)
     }
-
-    // 바닐라 런처 파일이 있으면 → .minecraft 폴더를 압축한 것
-    if !vanilla_launcher_files.is_empty() {
-        // 추가로 assets/objects/ 또는 libraries/ 디렉토리 존재 확인
-        let mut has_vanilla_dirs = false;
-        for i in 0..archive.len() {
-            let entry = match archive.by_index(i) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let name = entry.name().replace('\\', "/");
-            for &dir in VANILLA_DIRS {
-                if name.starts_with(dir) {
-                    has_vanilla_dirs = true;
-                    break;
-                }
-            }
-            if has_vanilla_dirs {
-                break;
-            }
-        }
-
-        if has_vanilla_dirs {
-            return Err(
-                "지원되지 않는 파일 형식입니다. 이 zip은 바닐라 런처의 .minecraft 폴더를 \
-                 그대로 압축한 파일입니다. PrismLauncher 인스턴스 형식(instance.cfg 포함)으로 \
-                 내보낸 파일만 가져올 수 있습니다."
-                    .to_string(),
-            );
-        }
-    }
-
-    // instance.cfg도 없고 바닐라 마커도 없는 경우 → 일단 통과
-    // (mods만 묶은 zip 등 다양한 형태가 있을 수 있음)
-    Ok(())
 }
 
 pub fn import_modpack<F>(exe_path: &str, zip_path: &Path, on_progress: F) -> Result<(), String>
@@ -112,6 +82,389 @@ where
 {
     let instances_dir = prism_instances_dir(exe_path)?;
     extract_zip(zip_path, &instances_dir, on_progress)
+}
+
+/// 바닐라 .minecraft zip을 PrismLauncher 인스턴스로 변환하여 가져오기
+pub fn import_vanilla_zip<F>(
+    zip_path: &Path,
+    instances_dir: &Path,
+    on_progress: F,
+) -> Result<(), String>
+where
+    F: Fn(usize, usize),
+{
+    let instance_name = instance_name_from_zip(zip_path);
+    if instance_name.is_empty() {
+        return Err("파일이름에서 인스턴스 이름을 추출할 수 없습니다".to_string());
+    }
+
+    let file = fs::File::open(zip_path)
+        .map_err(|e| format!("zip 파일 열기 실패: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("zip 읽기 실패: {}", e))?;
+
+    // 1. versions/ 디렉토리에서 MC 버전 + 모드로더 파싱
+    let loader_info = detect_loader_from_zip(&mut archive)?;
+    log::info!(
+        "바닐라 zip 감지: MC {}, 로더: {:?}",
+        loader_info.mc_version,
+        loader_info.loader
+    );
+
+    let instance_dir = instances_dir.join(&instance_name);
+    let minecraft_dir = instance_dir.join(".minecraft");
+    fs::create_dir_all(&minecraft_dir)
+        .map_err(|e| format!("디렉토리 생성 실패: {}", e))?;
+
+    // 2. 게임 데이터만 선별 추출 → .minecraft/ 에 배치
+    let total = archive.len();
+    for i in 0..total {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip 엔트리 읽기 실패: {}", e))?;
+
+        let raw_name = entry.name().replace('\\', "/");
+        if raw_name.is_empty() {
+            on_progress(i + 1, total);
+            continue;
+        }
+
+        // 스킵 대상: 런처 파일, 런타임 디렉토리
+        if should_skip_vanilla_entry(&raw_name) {
+            on_progress(i + 1, total);
+            continue;
+        }
+
+        // 경로 탐색 공격 차단
+        if raw_name.contains("..") || Path::new(&raw_name).is_absolute() {
+            log::warn!("위험한 zip 엔트리 차단: {}", raw_name);
+            on_progress(i + 1, total);
+            continue;
+        }
+
+        let target = minecraft_dir.join(&raw_name);
+
+        if entry.is_dir() || raw_name.ends_with('/') {
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("디렉토리 생성 실패: {}", e))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("디렉토리 생성 실패: {}", e))?;
+            }
+            let mut outfile = fs::File::create(&target)
+                .map_err(|e| format!("파일 생성 실패: {}", e))?;
+            io::copy(&mut entry, &mut outfile)
+                .map_err(|e| format!("파일 쓰기 실패: {}", e))?;
+        }
+
+        on_progress(i + 1, total);
+    }
+
+    // 3. mmc-pack.json 생성
+    generate_vanilla_mmc_pack(&loader_info, &instance_dir)?;
+
+    // 4. instance.cfg 생성
+    generate_vanilla_instance_cfg(&loader_info, &instance_dir, &instance_name)?;
+
+    log::info!(
+        "바닐라 zip → 인스턴스 '{}' 변환 완료 (MC {}, {:?})",
+        instance_name,
+        loader_info.mc_version,
+        loader_info.loader
+    );
+    Ok(())
+}
+
+/// 바닐라 zip에서 스킵해야 할 엔트리인지 판별
+fn should_skip_vanilla_entry(name: &str) -> bool {
+    // 런처 자체 파일
+    if name.starts_with("launcher_") || name == "clientId_v2.txt"
+        || name == "treatment_tags.json" || name == "updateSourceCache.json"
+    {
+        return true;
+    }
+    // 런타임/캐시 디렉토리 (PrismLauncher가 자체 관리)
+    let skip_prefixes = [
+        "assets/", "libraries/", "versions/", "bin/",
+        "logs/", "crash-reports/", "webcache2/", "tv-cache/",
+        "staging/", "quickPlay/", "avatars/",
+        ".mixin.out/",
+    ];
+    for prefix in &skip_prefixes {
+        if name.starts_with(prefix) {
+            return true;
+        }
+    }
+    // 바이너리 런처 파일
+    if name.ends_with("_msa_credentials.bin")
+        || name.ends_with("_msa_credentials_microsoft_store.bin")
+    {
+        return true;
+    }
+    false
+}
+
+/// 모드로더 종류
+#[derive(Debug, Clone)]
+pub enum ModLoader {
+    Vanilla,
+    Forge(String),      // forge 버전
+    Fabric(String),     // fabric-loader 버전
+    NeoForge(String),   // neoforge 버전
+    Quilt(String),      // quilt-loader 버전
+}
+
+/// zip에서 추출한 로더 정보
+#[derive(Debug, Clone)]
+pub struct LoaderInfo {
+    pub mc_version: String,
+    pub loader: ModLoader,
+}
+
+/// versions/ 디렉토리명에서 MC 버전 + 모드로더 파싱
+fn detect_loader_from_zip(archive: &mut zip::ZipArchive<fs::File>) -> Result<LoaderInfo, String> {
+    let mut version_dirs: Vec<String> = Vec::new();
+
+    for i in 0..archive.len() {
+        let entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.name().replace('\\', "/");
+        // versions/X.Y.Z/ 또는 versions/1.16.5-forge-36.2.33/ 형태
+        if let Some(rest) = name.strip_prefix("versions/") {
+            if let Some(dir_name) = rest.split('/').next() {
+                if !dir_name.is_empty()
+                    && dir_name != "jre_manifest.json"
+                    && dir_name != "version_manifest_v2.json"
+                    && !version_dirs.contains(&dir_name.to_string())
+                {
+                    version_dirs.push(dir_name.to_string());
+                }
+            }
+        }
+    }
+
+    log::info!("versions/ 디렉토리 목록: {:?}", version_dirs);
+
+    if version_dirs.is_empty() {
+        return Err("versions/ 디렉토리에서 버전 정보를 찾을 수 없습니다".to_string());
+    }
+
+    // 모드로더 버전 디렉토리 우선 탐색
+    for dir in &version_dirs {
+        // Forge: "1.16.5-forge-36.2.33"
+        if let Some(info) = parse_forge_version(dir) {
+            return Ok(info);
+        }
+        // Fabric: "fabric-loader-0.16.0-1.21.1"
+        if let Some(info) = parse_fabric_version(dir) {
+            return Ok(info);
+        }
+        // NeoForge: "neoforge-21.1.1" 또는 "1.20.4-neoforge-20.4.xxx"
+        if let Some(info) = parse_neoforge_version(dir) {
+            return Ok(info);
+        }
+        // Quilt: "quilt-loader-0.26.0-1.21.1"
+        if let Some(info) = parse_quilt_version(dir) {
+            return Ok(info);
+        }
+    }
+
+    // 모드로더가 없으면 순수 MC 버전 (스냅샷 등 제외하고 릴리스 우선)
+    let mc_version = version_dirs
+        .iter()
+        .find(|v| is_release_version(v))
+        .or_else(|| version_dirs.first())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(LoaderInfo {
+        mc_version,
+        loader: ModLoader::Vanilla,
+    })
+}
+
+/// "1.16.5-forge-36.2.33" → LoaderInfo
+fn parse_forge_version(dir: &str) -> Option<LoaderInfo> {
+    // 패턴: {mc_version}-forge-{forge_version}
+    let parts: Vec<&str> = dir.splitn(3, '-').collect();
+    if parts.len() == 3 && parts[1] == "forge" {
+        return Some(LoaderInfo {
+            mc_version: parts[0].to_string(),
+            loader: ModLoader::Forge(parts[2].to_string()),
+        });
+    }
+    None
+}
+
+/// "fabric-loader-0.16.0-1.21.1" → LoaderInfo
+fn parse_fabric_version(dir: &str) -> Option<LoaderInfo> {
+    let rest = dir.strip_prefix("fabric-loader-")?;
+    // rest = "0.16.0-1.21.1"  →  loader_ver-mc_ver
+    let dash = rest.rfind('-')?;
+    let loader_ver = &rest[..dash];
+    let mc_ver = &rest[dash + 1..];
+    if !mc_ver.is_empty() && mc_ver.contains('.') {
+        Some(LoaderInfo {
+            mc_version: mc_ver.to_string(),
+            loader: ModLoader::Fabric(loader_ver.to_string()),
+        })
+    } else {
+        None
+    }
+}
+
+/// "neoforge-21.1.1" 또는 "1.20.4-neoforge-20.4.xxx" → LoaderInfo
+fn parse_neoforge_version(dir: &str) -> Option<LoaderInfo> {
+    if let Some(rest) = dir.strip_prefix("neoforge-") {
+        // "neoforge-21.1.1" — MC 버전은 NeoForge 메이저에서 추론 필요
+        // NeoForge 21.x = MC 1.21.x 등. 정확한 매핑은 어려우므로 버전만 저장
+        return Some(LoaderInfo {
+            mc_version: String::new(), // 아래에서 fallback 처리
+            loader: ModLoader::NeoForge(rest.to_string()),
+        });
+    }
+    // "1.20.4-neoforge-20.4.xxx"
+    let parts: Vec<&str> = dir.splitn(3, '-').collect();
+    if parts.len() == 3 && parts[1] == "neoforge" {
+        return Some(LoaderInfo {
+            mc_version: parts[0].to_string(),
+            loader: ModLoader::NeoForge(parts[2].to_string()),
+        });
+    }
+    None
+}
+
+/// "quilt-loader-0.26.0-1.21.1" → LoaderInfo
+fn parse_quilt_version(dir: &str) -> Option<LoaderInfo> {
+    let rest = dir.strip_prefix("quilt-loader-")?;
+    let dash = rest.rfind('-')?;
+    let loader_ver = &rest[..dash];
+    let mc_ver = &rest[dash + 1..];
+    if !mc_ver.is_empty() && mc_ver.contains('.') {
+        Some(LoaderInfo {
+            mc_version: mc_ver.to_string(),
+            loader: ModLoader::Quilt(loader_ver.to_string()),
+        })
+    } else {
+        None
+    }
+}
+
+/// 릴리스 버전인지 (1.X.Y 형태)
+fn is_release_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() >= 2 && parts[0].parse::<u32>().is_ok() && parts[1].parse::<u32>().is_ok()
+}
+
+/// 바닐라 zip용 mmc-pack.json 생성
+fn generate_vanilla_mmc_pack(info: &LoaderInfo, instance_dir: &Path) -> Result<(), String> {
+    let mut components = Vec::new();
+
+    // Minecraft
+    if !info.mc_version.is_empty() {
+        components.push(serde_json::json!({
+            "cachedName": "Minecraft",
+            "cachedVersion": info.mc_version,
+            "important": true,
+            "uid": "net.minecraft",
+            "version": info.mc_version
+        }));
+    }
+
+    match &info.loader {
+        ModLoader::Forge(ver) => {
+            components.push(serde_json::json!({
+                "cachedName": "Forge",
+                "cachedVersion": ver,
+                "uid": "net.minecraftforge",
+                "version": ver
+            }));
+        }
+        ModLoader::Fabric(ver) => {
+            if !info.mc_version.is_empty() {
+                components.push(serde_json::json!({
+                    "cachedName": "Intermediary Mappings",
+                    "cachedVersion": info.mc_version,
+                    "cachedVolatile": true,
+                    "dependencyOnly": true,
+                    "uid": "net.fabricmc.intermediary",
+                    "version": info.mc_version
+                }));
+            }
+            components.push(serde_json::json!({
+                "cachedName": "Fabric Loader",
+                "cachedVersion": ver,
+                "uid": "net.fabricmc.fabric-loader",
+                "version": ver
+            }));
+        }
+        ModLoader::NeoForge(ver) => {
+            components.push(serde_json::json!({
+                "cachedName": "NeoForge",
+                "cachedVersion": ver,
+                "uid": "net.neoforged.neoforge",
+                "version": ver
+            }));
+        }
+        ModLoader::Quilt(ver) => {
+            components.push(serde_json::json!({
+                "cachedName": "Quilt Loader",
+                "cachedVersion": ver,
+                "uid": "org.quiltmc.quilt-loader",
+                "version": ver
+            }));
+        }
+        ModLoader::Vanilla => {}
+    }
+
+    let mmc_pack = serde_json::json!({
+        "components": components,
+        "formatVersion": 1
+    });
+
+    let content = serde_json::to_string_pretty(&mmc_pack)
+        .map_err(|e| format!("mmc-pack.json 생성 실패: {}", e))?;
+    fs::write(instance_dir.join("mmc-pack.json"), content)
+        .map_err(|e| format!("mmc-pack.json 쓰기 실패: {}", e))?;
+
+    log::info!("mmc-pack.json 생성 완료");
+    Ok(())
+}
+
+/// 바닐라 zip용 instance.cfg 생성
+fn generate_vanilla_instance_cfg(
+    info: &LoaderInfo,
+    instance_dir: &Path,
+    instance_name: &str,
+) -> Result<(), String> {
+    let loader_name = match &info.loader {
+        ModLoader::Vanilla => "Vanilla",
+        ModLoader::Forge(_) => "Forge",
+        ModLoader::Fabric(_) => "Fabric",
+        ModLoader::NeoForge(_) => "NeoForge",
+        ModLoader::Quilt(_) => "Quilt",
+    };
+
+    let cfg = format!(
+        "[General]\n\
+         AutomaticJava=false\n\
+         ConfigVersion=1.3\n\
+         InstanceType=OneSix\n\
+         OverrideJavaLocation=true\n\
+         iconKey=default\n\
+         name={}\n\
+         notes=Converted from vanilla .minecraft zip ({} {})\n",
+        instance_name, loader_name, info.mc_version
+    );
+
+    fs::write(instance_dir.join("instance.cfg"), cfg)
+        .map_err(|e| format!("instance.cfg 쓰기 실패: {}", e))?;
+
+    log::info!("instance.cfg 생성 완료");
+    Ok(())
 }
 
 /// PrismLauncher 데이터 루트 폴더 찾기 (표준/portable 지원)
