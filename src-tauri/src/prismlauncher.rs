@@ -482,7 +482,7 @@ fn generate_vanilla_mmc_pack(info: &LoaderInfo, instance_dir: &Path) -> Result<(
             components.push(serde_json::json!({
                 "cachedName": "NeoForge",
                 "cachedVersion": ver,
-                "uid": "net.neoforged.neoforge",
+                "uid": "net.neoforged",
                 "version": ver
             }));
         }

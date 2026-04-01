@@ -359,9 +359,11 @@ pub async fn setup_java_for_instance(instance_dir: &Path, prism_data: Option<&Pa
         let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
 
         let java_path_str = java_path.to_string_lossy().to_string();
-        // Windows에서는 백슬래시, 나머지는 그대로
+        // PrismLauncher는 Qt QSettings(INI 포맷)로 instance.cfg를 읽음.
+        // Qt INI 파서가 \U, \P 등을 이스케이프 시퀀스로 해석하여 백슬래시를 제거하므로
+        // Windows에서도 포워드 슬래시를 사용 (Java/PrismLauncher 모두 지원)
         #[cfg(target_os = "windows")]
-        let java_path_str = java_path_str.replace('/', "\\");
+        let java_path_str = java_path_str.replace('\\', "/");
 
         let java_ver_str = java_ver.to_string();
 
