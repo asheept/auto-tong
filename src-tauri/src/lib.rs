@@ -88,7 +88,7 @@ fn save_config(
     let autostart = app_handle.autolaunch();
     if new_config.autostart {
         autostart.enable().map_err(|e| e.to_string())?;
-    } else {
+    } else if autostart.is_enabled().map_err(|e| e.to_string())? {
         autostart.disable().map_err(|e| e.to_string())?;
     }
 
