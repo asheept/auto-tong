@@ -5,6 +5,8 @@ use std::path::Path;
 use serde::Deserialize;
 use sha2::{Sha512, Digest};
 
+use crate::zip_util::decode_zip_name;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MrpackIndex {
@@ -95,7 +97,7 @@ where
             .by_index(i)
             .map_err(|e| format!("zip 엔트리 오류: {}", e))?;
 
-        let raw_name = entry.name().replace('\\', "/");
+        let raw_name = decode_zip_name(entry.name_raw(), entry.name());
 
         let relative = override_prefixes
             .iter()

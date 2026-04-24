@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::zip_util::decode_zip_name;
+
 /// Java 바이너리 이름 (플랫폼별)
 #[cfg(target_os = "windows")]
 const JAVA_BINARY: &str = "javaw.exe";
@@ -244,11 +246,11 @@ fn extract_zip_archive(
 
     let root_prefix = {
         if archive.len() > 0 {
-            let first_name = archive.by_index(0).ok().map(|e| e.name().to_string());
-            first_name.and_then(|n| {
-                let n = n.replace('\\', "/");
-                n.find('/').map(|pos| format!("{}/", &n[..pos]))
-            })
+            let first_name = archive
+                .by_index(0)
+                .ok()
+                .map(|e| decode_zip_name(e.name_raw(), e.name()));
+            first_name.and_then(|n| n.find('/').map(|pos| format!("{}/", &n[..pos])))
         } else {
             None
         }
@@ -259,7 +261,7 @@ fn extract_zip_archive(
             .by_index(i)
             .map_err(|e| format!("zip 엔트리 오류: {}", e))?;
 
-        let raw_name = entry.name().replace('\\', "/");
+        let raw_name = decode_zip_name(entry.name_raw(), entry.name());
         let relative = if let Some(ref prefix) = root_prefix {
             if let Some(rest) = raw_name.strip_prefix(prefix.as_str()) {
                 rest.to_string()

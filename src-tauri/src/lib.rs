@@ -5,6 +5,7 @@ mod prismlauncher;
 mod tracker;
 mod tray;
 mod watcher;
+mod zip_util;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

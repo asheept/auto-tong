@@ -1,6 +1,6 @@
 [package]
 name = "auto-tong"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 
 [build-dependencies]
@@ -25,3 +25,4 @@ reqwest = { version = "0.12", features = ["rustls-tls"], default-features = fals
 sha2 = "0.10"
 arboard = "3"
 tauri-plugin-single-instance = "2"
+encoding_rs = "0.8"

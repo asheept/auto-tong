@@ -3,6 +3,8 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
+use crate::zip_util::decode_zip_name;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -49,7 +51,7 @@ pub fn detect_zip_type(zip_path: &Path) -> Result<ZipType, String> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let name = entry.name().replace('\\', "/");
+        let name = decode_zip_name(entry.name_raw(), entry.name());
 
         if name == "instance.cfg" || name.ends_with("/instance.cfg") {
             has_instance_cfg = true;
@@ -137,7 +139,7 @@ where
             .by_index(i)
             .map_err(|e| format!("zip 엔트리 읽기 실패: {}", e))?;
 
-        let raw_name = entry.name().replace('\\', "/");
+        let raw_name = decode_zip_name(entry.name_raw(), entry.name());
         if raw_name.is_empty() {
             on_progress(i + 1, total);
             continue;
@@ -249,7 +251,7 @@ fn detect_vanilla_root_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option
             Ok(e) => e,
             Err(_) => continue,
         };
-        let name = entry.name().replace('\\', "/");
+        let name = decode_zip_name(entry.name_raw(), entry.name());
 
         for &marker in VANILLA_MARKERS {
             // 최상위에 있으면 프리픽스 없음
@@ -304,7 +306,7 @@ fn detect_loader_from_zip(
             Ok(e) => e,
             Err(_) => continue,
         };
-        let name = entry.name().replace('\\', "/");
+        let name = decode_zip_name(entry.name_raw(), entry.name());
         if let Some(rest) = name.strip_prefix(&versions_prefix) {
             if let Some(dir_name) = rest.split('/').next() {
                 if !dir_name.is_empty()
@@ -331,13 +333,28 @@ fn detect_loader_from_zip(
             .or_else(|| parse_neoforge_version(dir))
             .or_else(|| parse_quilt_version(dir))
         {
-            // mc_version이 비어있으면 (예: "neoforge-21.1.1") version_dirs에서 보충
+            // mc_version이 비어있으면 다단 fallback으로 결정
             if info.mc_version.is_empty() {
-                info.mc_version = version_dirs
-                    .iter()
-                    .find(|v| is_release_version(v))
-                    .cloned()
-                    .unwrap_or_default();
+                // 1순위: 로더 폴더의 <dir>.json inheritsFrom (가장 정확)
+                let from_json = read_inherits_from(archive, root_prefix, dir);
+                // 2순위: 로더 종류별 버전 번호 규칙 추론
+                let inferred = from_json.or_else(|| match &info.loader {
+                    ModLoader::NeoForge(v) => infer_mc_from_neoforge(v),
+                    _ => None,
+                });
+                // 3순위: versions/ 디렉토리의 다른 릴리스 폴더 (로더 폴더 본인 제외)
+                info.mc_version = inferred.unwrap_or_else(|| {
+                    version_dirs
+                        .iter()
+                        .find(|v| v.as_str() != dir && is_release_version(v))
+                        .cloned()
+                        .unwrap_or_default()
+                });
+            }
+            if info.mc_version.is_empty() {
+                return Err(
+                    "모드로더는 감지했으나 Minecraft 버전을 추론할 수 없습니다".to_string(),
+                );
             }
             return Ok(info);
         }
@@ -434,6 +451,39 @@ fn parse_quilt_version(dir: &str) -> Option<LoaderInfo> {
 fn is_release_version(v: &str) -> bool {
     let parts: Vec<&str> = v.split('.').collect();
     parts.len() >= 2 && parts[0].parse::<u32>().is_ok() && parts[1].parse::<u32>().is_ok()
+}
+
+/// 로더 폴더 내 `<dir>/<dir>.json`에서 `inheritsFrom` 값을 읽어 MC 버전 반환
+fn read_inherits_from(
+    archive: &mut zip::ZipArchive<fs::File>,
+    root_prefix: Option<&str>,
+    dir_name: &str,
+) -> Option<String> {
+    use std::io::Read;
+    let path = match root_prefix {
+        Some(p) => format!("{}versions/{}/{}.json", p, dir_name, dir_name),
+        None => format!("versions/{}/{}.json", dir_name, dir_name),
+    };
+    let mut entry = archive.by_name(&path).ok()?;
+    let mut content = String::new();
+    entry.read_to_string(&mut content).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed
+        .get("inheritsFrom")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// NeoForge 버전 번호에서 MC 버전 추론 (예: 21.1.218 → 1.21.1, 20.4.230 → 1.20.4)
+fn infer_mc_from_neoforge(ver: &str) -> Option<String> {
+    let parts: Vec<&str> = ver.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let major: u32 = parts[0].parse().ok()?;
+    let minor: u32 = parts[1].parse().ok()?;
+    Some(format!("1.{}.{}", major, minor))
 }
 
 /// 바닐라 zip용 mmc-pack.json 생성
@@ -617,7 +667,7 @@ where
     {
         for i in 0..archive.len() {
             if let Ok(entry) = archive.by_index(i) {
-                let name = entry.name().replace('\\', "/");
+                let name = decode_zip_name(entry.name_raw(), entry.name());
                 if name == "instance.cfg" || name == "mmc-pack.json" {
                     root_prefix = None;
                     break;
@@ -648,7 +698,7 @@ where
             .by_index(i)
             .map_err(|e| format!("zip 엔트리 읽기 실패: {}", e))?;
 
-        let raw_name = entry.name().replace('\\', "/");
+        let raw_name = decode_zip_name(entry.name_raw(), entry.name());
         if raw_name.is_empty() {
             on_progress(i + 1, total);
             continue;
