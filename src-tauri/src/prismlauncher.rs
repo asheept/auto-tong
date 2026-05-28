@@ -870,7 +870,12 @@ pub fn start_prism(exe_path: &str) {
 }
 
 /// PrismLauncher 새로고침 시도. 성공하면 true, java 대기 중이면 false.
+/// PrismLauncher가 실행 중이지 않으면 재실행하지 않고 pending만 해제 (true 반환).
 pub async fn try_refresh(exe_path: &str) -> bool {
+    if get_pid_by_path(exe_path).is_none() {
+        log::info!("PrismLauncher 미실행 — 자동 재실행 건너뜀");
+        return true;
+    }
     if kill_prism(exe_path).await {
         start_prism(exe_path);
         true
