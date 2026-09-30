@@ -28,8 +28,18 @@
       </div>
 
       <div class="field">
+        <label for="prismlauncher_data_dir">PrismLauncher 데이터 폴더</label>
+        <div class="input-row">
+          <input type="text" id="prismlauncher_data_dir" readonly placeholder="자동 검색">
+          <button type="button" id="btn-pick-prism-data">찾기</button>
+        </div>
+        <small>PrismLauncher의 폴더 → Launcher Root 위치입니다. 기본·portable이 함께 있으면 지정하세요.</small>
+      </div>
+
+      <div class="field">
         <label for="subscribed_tags">구독 태그 (쉼표 구분)</label>
         <input type="text" id="subscribed_tags" placeholder="예: everyone, 각별, daily">
+        <small>태그 이름을 쉼표로 구분해 입력하세요. @만 있는 태그는 저장할 수 없습니다.</small>
       </div>
 
       <div class="field">
@@ -60,6 +70,7 @@
           <div id="progress-fill" class="progress-fill"></div>
         </div>
         <span id="progress-status" class="progress-status"></span>
+        <button type="button" id="btn-cancel-import" class="btn-secondary">가져오기 취소</button>
       </div>
     </form>
 
@@ -72,9 +83,9 @@
     </div>
 
     <!-- 재다운로드 확인 모달 -->
-    <div id="reimport-modal" class="modal-overlay hidden">
+    <div id="reimport-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="reimport-modal-title">
       <div class="modal-box">
-        <p class="modal-title">다시 가져오기</p>
+        <p id="reimport-modal-title" class="modal-title">다시 가져오기</p>
         <p id="reimport-modal-msg" class="modal-msg"></p>
         <div class="modal-actions">
           <button id="reimport-cancel" class="btn-secondary">아니오</button>
@@ -93,6 +104,8 @@
     </div>
   </div>
 
+  <script src="progress-state.js"></script>
+  <script src="update-state.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

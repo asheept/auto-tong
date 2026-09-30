@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "windows": ["settings", "update-blocked"],
+  "windows": ["settings"],
   "permissions": [
     "core:default",
     "notification:default",

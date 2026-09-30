@@ -211,6 +211,15 @@ hr {
   margin-top: 4px;
 }
 
+#btn-cancel-import {
+  margin-top: 9px;
+  width: 100%;
+}
+
+#btn-cancel-import.hidden {
+  display: none;
+}
+
 .empty-text {
   font-size: 12px;
   color: #585b70;
@@ -235,6 +244,15 @@ hr {
 
 .history-section li.history-failed:hover {
   color: #f38ba8;
+}
+
+.history-section li.history-warning {
+  color: #f9e2af;
+}
+
+.history-section li:focus-visible {
+  outline: 2px solid #89b4fa;
+  outline-offset: 2px;
 }
 
 .history-x {
