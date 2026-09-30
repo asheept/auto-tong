@@ -57,6 +57,8 @@ Adoptium의 배포 메타데이터에서 SHA-256 체크섬을 확인하고, 다�
 
 설정의 실행 파일 경로와 데이터 폴더는 같은 Prism 설치를 가리켜야 합니다. PrismLauncher에서 **폴더 → Launcher Root**를 열어 표시된 폴더를 데이터 폴더에 지정합니다. 설정을 비우면 실행 파일 옆의 `portable.txt`가 있는 portable 설치를 우선 확인하고, 기본 위치와 portable 위치가 함께 있으면 자동으로 선택하지 않고 데이터 폴더 지정을 요청합니다. [Prism 공식 데이터 위치 안내](https://prismlauncher.org/wiki/getting-started/data-location/)에 따르면 Windows 기본 위치는 `%APPDATA%/PrismLauncher`, portable은 실행 파일 폴더입니다. 설정한 폴더 안에 `instances`가 있어야 가져오기를 시작합니다.
 
+설치 확정을 위해 실행 중인 런처를 정상 종료한 경우, 재실행 명령에도 같은 데이터 폴더를 `--dir`로 전달합니다. 원래 꺼져 있던 런처는 설치 후 자동 실행하지 않습니다.
+
 ## 버전과 배포
 
 `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `package.json`, `package-lock.json`의 제품 버전을 동일하게 유지합니다. npm 패키지명과 Cargo 패키지명은 `auto-tong`입니다. 버전을 바꾼 뒤 `npm install --package-lock-only`와 `cargo +stable-x86_64-pc-windows-msvc check`로 잠금 파일을 갱신하고, `npm run check:version`으로 확인합니다. 릴리스 태그는 정확히 `v<제품 버전>`이어야 하며 release workflow가 빌드 전에 검사합니다.

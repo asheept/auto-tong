@@ -1103,12 +1103,29 @@ fn require_stopped(state: PrismState) -> Result<(), String> {
     }
 }
 
-pub async fn restore_after_commit(exe_path: &str, was_running: bool) -> Result<(), String> {
+fn launcher_restart_command(exe_path: &str, data_dir: &str) -> Result<Command, String> {
+    let instances = prism_instances_dir(exe_path, data_dir)?;
+    let root = instances.parent().ok_or("PrismLauncher 데이터 폴더 없음")?;
+    let mut command = Command::new(exe_path);
+    command.arg("--dir").arg(root);
+    silent_command(&mut command);
+    Ok(command)
+}
+
+pub async fn restore_after_commit(
+    exe_path: &str,
+    data_dir: &str,
+    was_running: bool,
+) -> Result<(), String> {
+    if !was_running {
+        return Ok(());
+    }
+    let mut restart = launcher_restart_command(exe_path, data_dir)?;
     restore_after_commit_with(
         was_running,
         || query_prism_state(exe_path),
         || {
-            Command::new(exe_path)
+            restart
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| format!("PrismLauncher 재실행 실패: {e}"))
@@ -1293,6 +1310,30 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn restart_uses_selected_data_root_and_leaves_stopped_launcher_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let portable = temp.path().join("portable Prism");
+        let selected = temp.path().join("O'Neil 한글 데이터");
+        fs::create_dir_all(portable.join("instances")).unwrap();
+        fs::create_dir_all(selected.join("instances")).unwrap();
+        fs::write(portable.join("portable.txt"), "").unwrap();
+        let executable = portable.join("prismlauncher.exe");
+        let command =
+            launcher_restart_command(executable.to_str().unwrap(), selected.to_str().unwrap())
+                .unwrap();
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("--dir"), selected.as_os_str()]
+        );
+        assert!(
+            restore_after_commit("missing launcher", "missing data", false)
+                .await
+                .is_ok()
+        );
     }
 
     #[cfg(target_os = "windows")]

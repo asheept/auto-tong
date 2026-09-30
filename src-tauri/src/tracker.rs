@@ -652,7 +652,7 @@ impl Tracker {
                 installed: record.installed.is_some(),
             });
         }
-        items.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        items.sort_by_key(|item| item.timestamp);
         items
     }
 

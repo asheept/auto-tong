@@ -9,7 +9,7 @@ context: |
   Preserve user saves, local settings, existing installations, and launcher running state.
   Source review baseline: 6463876 (0.2.9), reviewed on 2026-09-30.
   Distinguish observed behavior from proposed requirements and unverified assumptions.
-  Current review request covers findings and implementation planning only.
+  Current request authorizes implementation and verification; mark only verified tasks complete.
   Windows verification uses stable-x86_64-pc-windows-msvc; default GNU lacks dlltool here.
 
 # Per-artifact rules (optional)

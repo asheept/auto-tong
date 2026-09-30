@@ -458,11 +458,7 @@ async fn scan_and_import(
                     &stage_instances,
                     &instance_name,
                     |current, total, fname| {
-                        let percent = if total > 0 {
-                            (current * 100 / total) as u32
-                        } else {
-                            0
-                        };
+                        let percent = (current * 100).checked_div(total).unwrap_or(0) as u32;
                         emit_progress(
                             &app_h,
                             download_job,
@@ -493,11 +489,7 @@ async fn scan_and_import(
                         &stage_instances,
                         &instance_name,
                         |current, total| {
-                            let percent = if total > 0 {
-                                (current * 100 / total) as u32
-                            } else {
-                                0
-                            };
+                            let percent = (current * 100).checked_div(total).unwrap_or(0) as u32;
                             emit_progress(
                                 app_handle,
                                 &job,
@@ -514,11 +506,7 @@ async fn scan_and_import(
                     archive_path,
                     &instance_name,
                     |current, total| {
-                        let percent = if total > 0 {
-                            (current * 100 / total) as u32
-                        } else {
-                            0
-                        };
+                        let percent = (current * 100).checked_div(total).unwrap_or(0) as u32;
                         emit_progress(
                             app_handle,
                             &job,
@@ -656,9 +644,12 @@ async fn scan_and_import(
                         "이력 저장 실패",
                         &format!("{}: {}", relative, error),
                     );
-                    if let Err(restart_error) =
-                        prismlauncher::restore_after_commit(&config.prismlauncher_exe, was_running)
-                            .await
+                    if let Err(restart_error) = prismlauncher::restore_after_commit(
+                        &config.prismlauncher_exe,
+                        &config.prismlauncher_data_dir,
+                        was_running,
+                    )
+                    .await
                     {
                         log::error!("이력 저장 실패 후 런처 재실행 실패: {}", restart_error);
                     }
@@ -670,8 +661,12 @@ async fn scan_and_import(
                         send_notification(app_handle, "설치 백업 정리 필요", &error);
                     }
                 }
-                match prismlauncher::restore_after_commit(&config.prismlauncher_exe, was_running)
-                    .await
+                match prismlauncher::restore_after_commit(
+                    &config.prismlauncher_exe,
+                    &config.prismlauncher_data_dir,
+                    was_running,
+                )
+                .await
                 {
                     Ok(()) => {
                         emit_progress(app_handle, &job, ImportPhase::Completed, 100, "완료", None)
@@ -703,9 +698,13 @@ async fn scan_and_import(
             Err(err) => {
                 if cancellation.is_cancelled() {
                     if was_running {
-                        prismlauncher::restore_after_commit(&config.prismlauncher_exe, true)
-                            .await
-                            .ok();
+                        prismlauncher::restore_after_commit(
+                            &config.prismlauncher_exe,
+                            &config.prismlauncher_data_dir,
+                            true,
+                        )
+                        .await
+                        .ok();
                     }
                     if let Err(error) = tracker.mark_cancelled(history_key, &snapshot.fingerprint) {
                         log::error!("취소 이력 저장 실패: {} - {}", relative, error);
@@ -721,8 +720,12 @@ async fn scan_and_import(
                     return;
                 }
                 if was_running {
-                    if let Err(restart_error) =
-                        prismlauncher::restore_after_commit(&config.prismlauncher_exe, true).await
+                    if let Err(restart_error) = prismlauncher::restore_after_commit(
+                        &config.prismlauncher_exe,
+                        &config.prismlauncher_data_dir,
+                        true,
+                    )
+                    .await
                     {
                         log::error!("가져오기 실패 후 런처 재실행 실패: {}", restart_error);
                     }
