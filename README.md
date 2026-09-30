@@ -29,7 +29,7 @@ npm run check:version
 
 ## 작업 상태
 
-[OpenSpec 구현 작업](openspec/changes/harden-auto-tong-import-workflow/tasks.md)의 체크박스는 검증이 끝난 항목만 완료로 표시합니다. 2026-09-30에 기록된 진단은 기존 오류 동작을 재현하는 자료이며, 수정 완료를 뜻하지 않습니다.
+[OpenSpec 구현 작업](openspec/changes/archive/2026-09-30-harden-auto-tong-import-workflow/tasks.md)의 체크박스는 검증이 끝난 항목만 완료로 표시합니다. 수정과 실제 Windows·Prism·WebView2 검증 결과는 [검증 기록](openspec/changes/archive/2026-09-30-harden-auto-tong-import-workflow/verification-report.md)에 있습니다. 기준 명세는 `openspec/specs/`에 반영했습니다. 2026-09-30의 초기 진단은 수정 전 오류 동작을 재현한 자료로 보존합니다.
 
 ## MRPACK 다운로드 제한
 
