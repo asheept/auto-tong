@@ -644,11 +644,21 @@ mod tests {
                         Err(error) => panic!("fixture 요청 누락: {error}"),
                     }
                 };
+                connection.set_nonblocking(false).unwrap();
                 connection
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
-                let mut request = [0; 1024];
-                let _ = connection.read(&mut request);
+                // TCP may split headers across reads. Respond only after the
+                // complete GET headers arrive so closing the fixture cannot
+                // reset a connection while the client is still sending them.
+                let mut request = Vec::new();
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let count = connection.read(&mut chunk).unwrap();
+                    assert!(count > 0, "fixture 요청 헤더가 중단됐습니다");
+                    request.extend_from_slice(&chunk[..count]);
+                    assert!(request.len() <= 16 * 1024, "fixture 요청 헤더 크기 초과");
+                }
                 write!(
                     connection,
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
