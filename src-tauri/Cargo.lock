@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "auto-tong"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "arboard",
  "cap-fs-ext",
