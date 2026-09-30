@@ -12,6 +12,7 @@
 | [설계](changes/archive/2026-09-30-harden-auto-tong-import-workflow/design.md) | staging, journal, 이력 이전, 작업·업데이트 상태 |
 | [구현 작업](changes/archive/2026-09-30-harden-auto-tong-import-workflow/tasks.md) | 52/52개 작업의 검증과 완료 내역 |
 | [검증 기록](changes/archive/2026-09-30-harden-auto-tong-import-workflow/verification-report.md) | Rust 88개·JS 8개, 실제 Windows·WebView2·게임 보류 검증, GitHub CI 결과 |
+| [0.3.0 배포 기록](releases/0.3.0.md) | 버전 변경·master 병합·태그·릴리스 아티팩트 확인 |
 
 ## 요구사항
 
@@ -36,4 +37,4 @@ npx.cmd --yes @fission-ai/openspec@1.13.2 validate --specs --strict
 
 기준 명세 strict 검증과 [Windows CI](https://github.com/asheept/auto-tong/actions/runs/36656073469)는 통과했다. 보관한 `tasks.md`의 체크박스와 검증 기록에서 구현 완료 근거를 확인할 수 있다.
 
-후속 변경은 새 OpenSpec change로 제안·설계·검증 내역을 기록한다. [초안 PR #1](https://github.com/asheept/auto-tong/pull/1)에서 이번 수정 내역을 검토할 수 있다.
+후속 변경은 새 OpenSpec change로 제안·설계·검증 내역을 기록한다. [PR #1](https://github.com/asheept/auto-tong/pull/1)로 이번 수정과 0.3.0 버전 변경을 master에 반영했다.
