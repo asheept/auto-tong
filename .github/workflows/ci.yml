@@ -1,0 +1,44 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Check JavaScript and progress state
+        run: |
+          node --check src/main.js
+          node --test src/progress-state.test.js
+          node --test src/update-state.test.js
+          node --test scripts/check-version.test.js
+          node --test scripts/check-capabilities.test.js
+          npm run check:version
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+      - name: Lint Rust
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+      - name: Build Rust application
+        working-directory: src-tauri
+        run: cargo build --locked

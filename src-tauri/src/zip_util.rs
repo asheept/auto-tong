@@ -11,6 +11,52 @@
 //! 2. CP949(EUC-KR)로 디코딩 시도
 //! 3. 실패 시 `zip` crate 기본 해석(fallback) 사용
 
+#[derive(Clone, Copy)]
+pub struct ZipLimits {
+    pub entries: usize,
+    pub file_bytes: u64,
+    pub total_bytes: u64,
+}
+
+pub const DEFAULT_ZIP_LIMITS: ZipLimits = ZipLimits {
+    entries: 20_000,
+    file_bytes: 512 * 1024 * 1024,
+    total_bytes: 4 * 1024 * 1024 * 1024,
+};
+
+/// 대상 폴더를 만들기 전에 ZIP의 선언된 해제 크기를 검사한다.
+pub fn check_archive_limits(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    limits: ZipLimits,
+) -> Result<(), String> {
+    if archive.len() > limits.entries {
+        return Err(format!(
+            "ZIP 엔트리 수 제한 초과: {} > {}",
+            archive.len(),
+            limits.entries
+        ));
+    }
+    let mut total = 0u64;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("ZIP 엔트리 읽기 실패: {e}"))?;
+        if entry.size() > limits.file_bytes {
+            return Err(format!(
+                "ZIP 단일 파일 해제 크기 제한 초과: {}",
+                entry.name()
+            ));
+        }
+        total = total
+            .checked_add(entry.size())
+            .ok_or_else(|| "ZIP 총 해제 크기 계산 범위 초과".to_string())?;
+        if total > limits.total_bytes {
+            return Err("ZIP 총 해제 크기 제한 초과".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// ZIP 엔트리의 raw 파일명 바이트를 안전하게 UTF-8 문자열로 디코딩한다.
 ///
 /// - `raw`: `entry.name_raw()` 결과
@@ -41,7 +87,10 @@ mod tests {
 
     #[test]
     fn ascii_name_passes_through() {
-        assert_eq!(decode_zip_name(b"mods/fabric.jar", "mods/fabric.jar"), "mods/fabric.jar");
+        assert_eq!(
+            decode_zip_name(b"mods/fabric.jar", "mods/fabric.jar"),
+            "mods/fabric.jar"
+        );
     }
 
     #[test]

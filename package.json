@@ -1,12 +1,13 @@
 {
-  "name": "autu-tong",
-  "version": "1.0.0",
+  "name": "auto-tong",
+  "version": "0.2.9",
   "description": "",
   "main": "index.js",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "check:version": "node scripts/check-version.js"
   },
   "keywords": [],
   "author": "",

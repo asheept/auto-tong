@@ -1,0 +1,8 @@
+{
+  "identifier": "update-notice",
+  "windows": ["update-blocked"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

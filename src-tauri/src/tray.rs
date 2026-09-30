@@ -12,7 +12,9 @@ pub fn create_tray(
     watcher_tx: mpsc::Sender<WatcherCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let version_label = format!("Auto-Tong v{}", env!("CARGO_PKG_VERSION"));
-    let version_item = MenuItemBuilder::with_id("version", &version_label).enabled(false).build(app)?;
+    let version_item = MenuItemBuilder::with_id("version", &version_label)
+        .enabled(false)
+        .build(app)?;
     let check_now = MenuItemBuilder::with_id("check_now", "지금 확인").build(app)?;
     let copy_path = MenuItemBuilder::with_id("copy_push_path", "내보내기 경로 복사").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "설정").build(app)?;

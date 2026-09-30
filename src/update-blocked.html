@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>업데이트 설치 차단됨</title>
+  <title>업데이트 실패 안내</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -82,16 +82,12 @@
 </head>
 <body>
   <div class="icon">⚠️</div>
-  <h1>업데이트 설치가 차단되었습니다</h1>
-  <p>Windows 스마트 앱 컨트롤 또는 보안 설정이 업데이트를 차단하고 있을 수 있습니다.</p>
+  <h1 id="failure-title">업데이트에 실패했습니다</h1>
+  <p id="failure-guidance">업데이트 로그와 공식 릴리스를 확인한 뒤 다시 시도하세요.</p>
 
   <div class="steps">
     <div class="step">
-      <span class="step-label">방법 1: 스마트 앱 컨트롤 끄기</span>
-      <span class="step-path">설정 → 개인 정보 및 보안 → Windows 보안 → 앱 및 브라우저 컨트롤 → 스마트 앱 컨트롤 → 끄기</span>
-    </div>
-    <div class="step">
-      <span class="step-label">방법 2: GitHub에서 직접 다운로드</span>
+      <span class="step-label">공식 릴리스 확인</span>
       <a id="link-github" href="#">https://github.com/asheept/auto-tong/releases/latest</a>
     </div>
   </div>
@@ -103,6 +99,19 @@
   <script>
     const { getCurrentWindow } = window.__TAURI__.window;
     const GITHUB_URL = "https://github.com/asheept/auto-tong/releases/latest";
+    const guidance = {
+      network: ["네트워크 연결 오류", "네트워크 연결을 확인한 뒤 다시 시도하세요."],
+      signature: ["업데이트 파일 검증 실패", "공식 릴리스의 배포 상태를 확인하세요. 검증 오류가 계속되면 설치를 중단하세요."],
+      permission: ["설치 권한 오류", "앱을 종료한 뒤 설치 권한과 파일 잠금을 확인하세요."],
+      unknown: ["업데이트 실패", "업데이트 로그와 공식 릴리스를 확인한 뒤 다시 시도하세요."],
+    };
+    function showCategory(category) {
+      const [title, action] = guidance[category] || guidance.unknown;
+      document.getElementById("failure-title").textContent = title;
+      document.getElementById("failure-guidance").textContent = action;
+    }
+    showCategory(new URLSearchParams(location.search).get("category"));
+    window.__TAURI__.event.listen("update-failure-kind", (event) => showCategory(event.payload));
 
     document.getElementById("link-github").addEventListener("click", (e) => {
       e.preventDefault();

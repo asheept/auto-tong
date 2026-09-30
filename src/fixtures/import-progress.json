@@ -1,0 +1,12 @@
+{
+  "job_id": 7,
+  "source_id": "C:/packs|nested/pack.zip",
+  "file_name": "pack.zip",
+  "phase": "completed",
+  "percent": 100,
+  "status": "완료",
+  "terminal": true,
+  "error_category": null,
+  "error": null,
+  "retryable": false
+}
