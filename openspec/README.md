@@ -2,7 +2,7 @@
 
 ## 현재 상태
 
-2026-09-30 전체 코드 점검과 개선 계획을 작성했다. 제품 수정은 시작하지 않았다. OpenSpec 1.13.2의 `spec-driven` schema와 한국어 산출물을 사용한다.
+2026-09-30 전체 코드 점검을 바탕으로 가져오기·복구·감시·Prism·Java·업데이트 처리를 수정했다. 검증된 작업 50/52개를 완료 표시했다. 실제 PrismLauncher 게임 실행 중 보류 확인과 최종 명세 반영·archive가 남았다. OpenSpec 1.13.2의 `spec-driven` schema와 한국어 산출물을 사용한다.
 
 | 문서 | 내용 |
 | --- | --- |
@@ -10,7 +10,8 @@
 | [재현 안내](reviews/2026-09-30/verification/README.md) | 임시 fixture 기반 Rust/JS 진단 실행법과 한계 |
 | [제안서](changes/harden-auto-tong-import-workflow/proposal.md) | 개선 이유·범위·영향 |
 | [설계](changes/harden-auto-tong-import-workflow/design.md) | staging, journal, 이력 이전, 작업·업데이트 상태 |
-| [구현 작업](changes/harden-auto-tong-import-workflow/tasks.md) | 의존 순서와 확인 방법을 포함한 미완료 작업 52개 |
+| [구현 작업](changes/harden-auto-tong-import-workflow/tasks.md) | 검증된 작업 50개와 남은 작업 2개 |
+| [검증 기록](changes/harden-auto-tong-import-workflow/verification-report.md) | Rust 88개·JS 8개, 실제 Windows·WebView2 검증, GitHub CI 결과 |
 
 ## 요구사항
 
@@ -33,6 +34,6 @@ npx.cmd --yes @fission-ai/openspec@1.13.2 status --change harden-auto-tong-impor
 npx.cmd --yes @fission-ai/openspec@1.13.2 validate harden-auto-tong-import-workflow --strict
 ```
 
-현재 strict 검증은 통과했다. CLI의 planning 완료 표시는 문서가 준비되었다는 뜻이다. 실제 구현 진행률은 `tasks.md`의 체크박스를 기준으로 한다.
+현재 strict 검증과 [Windows CI](https://github.com/asheept/auto-tong/actions/runs/36656073469)는 통과했다. CLI의 planning 완료 표시는 문서가 준비되었다는 뜻이다. 실제 구현 진행률은 `tasks.md`의 체크박스를 기준으로 한다.
 
-구현을 시작할 때는 이 change에 `openspec-apply-change`를 사용하거나 적용을 요청한다. 수정한 항목만 검증 근거와 함께 완료 표시하고, 전체 요구사항 충족 후 기준 명세 반영과 archive를 진행한다.
+남은 검증은 이 change의 `openspec-apply-change`로 이어간다. 검증한 항목만 근거와 함께 완료 표시하고, 전체 요구사항 충족 후 기준 명세 반영과 archive를 진행한다.
