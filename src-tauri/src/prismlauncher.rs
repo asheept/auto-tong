@@ -886,6 +886,64 @@ enum CommitDecision {
     Defer,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImportPreflight {
+    Ready,
+    Deferred(String),
+}
+
+fn import_preflight_decision(exe_exists: bool, state: PrismState) -> ImportPreflight {
+    if !exe_exists {
+        return ImportPreflight::Deferred(
+            "PrismLauncher 실행 파일을 찾을 수 없습니다. 설정을 확인하세요.".into(),
+        );
+    }
+    match state {
+        PrismState::Stopped | PrismState::Running(_) => ImportPreflight::Ready,
+        PrismState::GameRunning(_) => ImportPreflight::Deferred(
+            "게임 실행 중이므로 가져오기를 보류합니다. 게임을 종료하면 자동으로 다시 시도합니다."
+                .into(),
+        ),
+        PrismState::QueryFailed(error) => ImportPreflight::Deferred(format!(
+            "런처 상태 조회 실패로 가져오기를 보류합니다: {error}"
+        )),
+    }
+}
+
+pub fn import_preflight(exe_path: &str) -> ImportPreflight {
+    let exists = Path::new(exe_path).is_file();
+    import_preflight_with(exists, || query_prism_state(exe_path))
+}
+
+pub fn deferred_import_resume_preflight(exe_path: &str) -> ImportPreflight {
+    let exists = Path::new(exe_path).is_file();
+    deferred_import_resume_preflight_with(exists, || query_prism_state(exe_path))
+}
+
+fn deferred_import_resume_preflight_with(
+    exists: bool,
+    query: impl FnOnce() -> PrismState,
+) -> ImportPreflight {
+    if !exists {
+        return import_preflight_decision(false, PrismState::Stopped);
+    }
+    match query() {
+        PrismState::Stopped => ImportPreflight::Ready,
+        PrismState::Running(_) => ImportPreflight::Deferred(
+            "이전 설치 확정이 보류되었습니다. PrismLauncher를 종료하면 자동으로 다시 시도합니다."
+                .into(),
+        ),
+        state => import_preflight_decision(true, state),
+    }
+}
+
+fn import_preflight_with(exe_exists: bool, query: impl FnOnce() -> PrismState) -> ImportPreflight {
+    if !exe_exists {
+        return import_preflight_decision(false, PrismState::Stopped);
+    }
+    import_preflight_decision(true, query())
+}
+
 fn commit_decision(state: &PrismState) -> CommitDecision {
     match state {
         PrismState::Stopped => CommitDecision::LeaveStopped,
@@ -1171,6 +1229,61 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
     use zip::{write::SimpleFileOptions, ZipWriter};
+
+    #[test]
+    fn import_preflight_defers_only_real_blockers() {
+        let mut queries = 0;
+        assert_eq!(
+            import_preflight_with(false, || {
+                queries += 1;
+                PrismState::Stopped
+            }),
+            ImportPreflight::Deferred(
+                "PrismLauncher 실행 파일을 찾을 수 없습니다. 설정을 확인하세요.".into()
+            )
+        );
+        assert_eq!(queries, 0);
+        assert_eq!(
+            import_preflight_with(true, || {
+                queries += 1;
+                PrismState::Stopped
+            }),
+            ImportPreflight::Ready
+        );
+        assert_eq!(queries, 1);
+        assert_eq!(
+            import_preflight_decision(true, PrismState::Running(42)),
+            ImportPreflight::Ready
+        );
+        assert!(matches!(
+            import_preflight_decision(true, PrismState::GameRunning(42)),
+            ImportPreflight::Deferred(_)
+        ));
+        assert!(matches!(
+            import_preflight_decision(true, PrismState::QueryFailed("denied".into())),
+            ImportPreflight::Deferred(message) if message.contains("denied")
+        ));
+        assert_eq!(
+            deferred_import_resume_preflight_with(true, || PrismState::Stopped),
+            ImportPreflight::Ready
+        );
+        assert!(matches!(
+            deferred_import_resume_preflight_with(true, || PrismState::Running(42)),
+            ImportPreflight::Deferred(_)
+        ));
+
+        let mut heavy_work = 0;
+        for preflight in [
+            import_preflight_with(true, || PrismState::GameRunning(42)),
+            import_preflight_with(true, || PrismState::QueryFailed("denied".into())),
+            import_preflight_with(true, || PrismState::Stopped),
+        ] {
+            if preflight == ImportPreflight::Ready {
+                heavy_work += 1;
+            }
+        }
+        assert_eq!(heavy_work, 1);
+    }
 
     #[test]
     fn selected_launcher_data_wins_and_ambiguous_install_requires_choice() {

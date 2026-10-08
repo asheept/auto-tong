@@ -1,4 +1,5 @@
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -25,6 +26,118 @@ pub enum WatcherCommand {
 pub struct WatcherApply {
     pub revision: u64,
     pub watch_mode: &'static str,
+}
+
+#[derive(Default)]
+struct IssueNotifications {
+    recovery: HashMap<String, HashSet<String>>,
+    sources: HashMap<String, HashSet<String>>,
+    commit_deferred: HashSet<String>,
+    content_episodes: HashMap<String, (u64, String)>,
+}
+
+impl IssueNotifications {
+    fn recovery_is_new(&mut self, root: String, error: &str) -> bool {
+        Self::is_new(&mut self.recovery, root, error)
+    }
+
+    fn source_is_new(&mut self, source: String, error: &str) -> bool {
+        Self::is_new(&mut self.sources, source, error)
+    }
+
+    fn is_new(issues: &mut HashMap<String, HashSet<String>>, key: String, error: &str) -> bool {
+        issues.entry(key).or_default().insert(error.to_string())
+    }
+
+    fn resolve_recovery(&mut self, root: &str) {
+        self.recovery.remove(root);
+    }
+
+    fn resolve_source(&mut self, source: &str) {
+        self.sources.remove(source);
+    }
+
+    fn resolve_all_source_issues(&mut self, source: &str) {
+        let prefix = format!("{source}\0");
+        self.sources.retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    fn observe_content_episode(&mut self, source: &str, size: u64, sha256: &str) -> bool {
+        let episode = (size, sha256.to_string());
+        if self.content_episodes.get(source) == Some(&episode) {
+            return false;
+        }
+        self.resolve_all_source_issues(source);
+        self.content_episodes.insert(source.to_string(), episode);
+        true
+    }
+
+    fn retain_sources(&mut self, present: &HashSet<String>) {
+        self.sources.retain(|key, _| {
+            key.rsplit_once('\0')
+                .is_some_and(|(source, _)| present.contains(source))
+        });
+        self.commit_deferred
+            .retain(|source| present.contains(source));
+        self.content_episodes
+            .retain(|source, _| present.contains(source));
+    }
+}
+
+struct FailedAttemptOutcome {
+    phase: ImportPhase,
+    category: ErrorCategory,
+    status: &'static str,
+    message: String,
+    persistence_failed: bool,
+}
+
+fn record_failed_attempt_with(
+    category: ErrorCategory,
+    message: String,
+    save: impl FnOnce() -> Result<(), String>,
+) -> FailedAttemptOutcome {
+    match save() {
+        Ok(()) => FailedAttemptOutcome {
+            phase: ImportPhase::Failed,
+            category,
+            status: "실패",
+            message,
+            persistence_failed: false,
+        },
+        Err(error) => FailedAttemptOutcome {
+            phase: ImportPhase::RecoveryRequired,
+            category: ErrorCategory::Storage,
+            status: "실패 이력 저장 실패 — 저장 공간 확인 필요",
+            message: error,
+            persistence_failed: true,
+        },
+    }
+}
+
+fn record_failed_attempt(
+    tracker: &Tracker,
+    history_key: &str,
+    modified_secs: u64,
+    fingerprint: &crate::source::Fingerprint,
+    category: ErrorCategory,
+    message: String,
+) -> FailedAttemptOutcome {
+    record_failed_attempt_with(category, message, || {
+        tracker.mark_failed_retryable(history_key, modified_secs, fingerprint)
+    })
+}
+
+fn launcher_issue_signature(error: &str) -> &str {
+    if error.contains("게임") {
+        "game-running"
+    } else if error.contains("조회") {
+        "query-failed"
+    } else if error.contains("실행 파일") {
+        "missing-executable"
+    } else {
+        error
+    }
 }
 
 async fn apply_control_command(
@@ -115,7 +228,8 @@ fn register_file_watcher(
 ) -> (Option<RecommendedWatcher>, &'static str) {
     match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
         if let Ok(event) = res {
-            if matches!(
+            let removed = matches!(event.kind, notify::EventKind::Remove(_));
+            let changed_archive = matches!(
                 event.kind,
                 notify::EventKind::Create(_) | notify::EventKind::Modify(_)
             ) && event.paths.iter().any(|path| {
@@ -124,7 +238,8 @@ fn register_file_watcher(
                     .is_some_and(|ext| {
                         ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("mrpack")
                     })
-            }) {
+            });
+            if removed || changed_archive {
                 watch_tx.try_send(WatcherCommand::CheckNow).ok();
             }
         }
@@ -158,6 +273,7 @@ pub fn start(
     let (tx, mut rx) = mpsc::channel::<WatcherCommand>(32);
     let initial_folder = config.drive_sync_folder.clone();
     let config = Arc::new(tokio::sync::Mutex::new(config));
+    let issues = Arc::new(std::sync::Mutex::new(IssueNotifications::default()));
 
     // File system watcher -> sends CheckNow on file events
     let fs_tx = tx.clone();
@@ -204,6 +320,7 @@ pub fn start(
                 let worker_tracker = tracker.clone();
                 let worker_app = app_handle.clone();
                 let runtime = tokio::runtime::Handle::current();
+                let worker_issues = issues.clone();
                 scan_task = Some(tokio::task::spawn_blocking(move || {
                     runtime.block_on(scan_and_import(
                         &worker_config,
@@ -211,6 +328,7 @@ pub fn start(
                         &worker_app,
                         &worker_cancellation,
                         &worker_gate,
+                        &worker_issues,
                     ));
                 }));
                 scan_requested = false;
@@ -253,25 +371,30 @@ async fn scan_and_import(
     app_handle: &tauri::AppHandle,
     cancellation: &CancellationToken,
     commit_gate: &AtomicU8,
+    issues: &std::sync::Mutex<IssueNotifications>,
 ) {
     if let Ok(instances) = prismlauncher::prism_instances_dir(
         &config.prismlauncher_exe,
         &config.prismlauncher_data_dir,
     ) {
         if let Some(root) = instances.parent() {
+            let root_key = root.to_string_lossy().to_string();
             match crate::managed_install::recover_journals(root, |key, modified, token| {
                 tracker.is_committed(key, modified, token)
             }) {
                 Ok(count) if count > 0 => {
+                    issues.lock().unwrap().resolve_recovery(&root_key);
                     log::warn!("미완료 설치 {}건 복구 후 이번 스캔을 보류합니다", count);
                     return;
                 }
                 Err(error) => {
                     log::error!("설치 복구 실패, 가져오기를 중단합니다: {}", error);
-                    send_notification(app_handle, "설치 복구 필요", &error);
+                    if issues.lock().unwrap().recovery_is_new(root_key, &error) {
+                        send_notification(app_handle, "설치 복구 필요", &error);
+                    }
                     return;
                 }
-                Ok(_) => {}
+                Ok(_) => issues.lock().unwrap().resolve_recovery(&root_key),
             }
         }
     }
@@ -281,6 +404,7 @@ async fn scan_and_import(
             "Drive 폴더가 존재하지 않습니다: {}",
             config.drive_sync_folder
         );
+        issues.lock().unwrap().retain_sources(&HashSet::new());
         return;
     }
 
@@ -289,6 +413,11 @@ async fn scan_and_import(
     } else {
         config.subscribed_tags.clone()
     };
+    let mut present_sources = HashSet::new();
+    let source_context = format!(
+        "{}\0{}",
+        config.prismlauncher_exe, config.prismlauncher_data_dir
+    );
 
     // 재귀적으로 모든 zip/mrpack 파일 탐색
     for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
@@ -332,6 +461,11 @@ async fn scan_and_import(
                 continue;
             }
         };
+        let source_issue_key = format!("{}\0{}", identity.id, source_context);
+        present_sources.insert(source_issue_key.clone());
+        let prism_issue_key = format!("{source_issue_key}\0prism");
+        let mapping_issue_key = format!("{source_issue_key}\0mapping");
+        let preflight_issue_key = format!("{source_issue_key}\0preflight");
 
         // instances 폴더 찾기 (표준/portable 모두 지원)
         let instances_dir = match prismlauncher::prism_instances_dir(
@@ -341,18 +475,35 @@ async fn scan_and_import(
             Ok(dir) => dir,
             Err(e) => {
                 log::error!("PrismLauncher instances 폴더를 찾을 수 없습니다: {}", e);
-                send_notification(app_handle, "가져오기 실패", &e);
+                if issues
+                    .lock()
+                    .unwrap()
+                    .source_is_new(prism_issue_key.clone(), &e)
+                {
+                    send_notification(app_handle, "가져오기 실패", &e);
+                }
                 continue;
             }
         };
+        issues.lock().unwrap().resolve_source(&prism_issue_key);
         let mapping = match tracker.resolve_source(&identity, &legacy_stem, &instances_dir) {
             Ok(mapping) => mapping,
             Err(error) => {
                 log::error!("원본 매핑 보류 {}: {}", relative, error);
-                send_notification(app_handle, "원본 매핑 확인 필요", &error);
+                if issues
+                    .lock()
+                    .unwrap()
+                    .source_is_new(mapping_issue_key.clone(), &error)
+                {
+                    send_notification(app_handle, "원본 매핑 확인 필요", &error);
+                }
                 continue;
             }
         };
+        {
+            let mut state = issues.lock().unwrap();
+            state.resolve_source(&mapping_issue_key);
+        }
         let probe = match crate::source::probe_fingerprint(path) {
             Ok(Some(fingerprint)) => fingerprint,
             Ok(None) => continue,
@@ -363,6 +514,50 @@ async fn scan_and_import(
         };
         if !tracker.needs_import_fingerprint(&mapping.history_key, &probe) {
             continue;
+        }
+        let resume_deferred = issues
+            .lock()
+            .unwrap()
+            .commit_deferred
+            .contains(&source_issue_key);
+        let preflight = if resume_deferred {
+            prismlauncher::deferred_import_resume_preflight(&config.prismlauncher_exe)
+        } else {
+            prismlauncher::import_preflight(&config.prismlauncher_exe)
+        };
+        {
+            let mut state = issues.lock().unwrap();
+            state.observe_content_episode(&source_issue_key, probe.size, &probe.sha256);
+        }
+        match preflight {
+            prismlauncher::ImportPreflight::Ready => {
+                let mut state = issues.lock().unwrap();
+                state.resolve_source(&preflight_issue_key);
+                state.commit_deferred.remove(&source_issue_key);
+            }
+            prismlauncher::ImportPreflight::Deferred(error) => {
+                let notify = issues.lock().unwrap().source_is_new(
+                    preflight_issue_key.clone(),
+                    launcher_issue_signature(&error),
+                );
+                if notify {
+                    let job = ImportJob {
+                        id: job::next_job_id(),
+                        source_id: identity.id.clone(),
+                        file_name: file_name.to_string(),
+                    };
+                    emit_progress(
+                        app_handle,
+                        &job,
+                        ImportPhase::Deferred,
+                        0,
+                        "런처 상태로 가져오기 보류",
+                        Some((ErrorCategory::Launcher, &error, true)),
+                    );
+                    send_notification(app_handle, "모드팩 가져오기 보류", &error);
+                }
+                continue;
+            }
         }
         let snapshot = match crate::source::snapshot_when_stable(path).await {
             Ok(Some(snapshot)) => snapshot,
@@ -420,30 +615,30 @@ async fn scan_and_import(
             Ok(stage) => stage,
             Err(error) => {
                 let message = format!("임시 설치 폴더 생성 실패: {error}");
-                emit_progress(
-                    app_handle,
-                    &job,
-                    ImportPhase::Failed,
-                    0,
-                    "준비 실패",
-                    Some((ErrorCategory::Storage, &message, true)),
+                let outcome = record_failed_attempt(
+                    tracker,
+                    &mapping.history_key,
+                    modified_secs,
+                    &snapshot.fingerprint,
+                    ErrorCategory::Storage,
+                    message,
                 );
-                send_notification(app_handle, "가져오기 실패", &message);
+                report_failed_attempt(app_handle, &job, issues, &source_issue_key, outcome);
                 continue;
             }
         };
         let stage_instances = stage.path().join("instances");
         if let Err(error) = std::fs::create_dir_all(&stage_instances) {
             let message = format!("임시 인스턴스 폴더 생성 실패: {error}");
-            emit_progress(
-                app_handle,
-                &job,
-                ImportPhase::Failed,
-                0,
-                "준비 실패",
-                Some((ErrorCategory::Storage, &message, true)),
+            let outcome = record_failed_attempt(
+                tracker,
+                &mapping.history_key,
+                modified_secs,
+                &snapshot.fingerprint,
+                ErrorCategory::Storage,
+                message,
             );
-            send_notification(app_handle, "가져오기 실패", &message);
+            report_failed_attempt(app_handle, &job, issues, &source_issue_key, outcome);
             continue;
         }
 
@@ -572,6 +767,11 @@ async fn scan_and_import(
                     Err(error) => {
                         import_result = Err(error);
                         deferred = true;
+                        issues
+                            .lock()
+                            .unwrap()
+                            .commit_deferred
+                            .insert(source_issue_key.clone());
                         failure_category = ErrorCategory::Launcher;
                     }
                 }
@@ -580,6 +780,11 @@ async fn scan_and_import(
                 if let Err(error) = prismlauncher::verify_stopped(&config.prismlauncher_exe) {
                     import_result = Err(error);
                     deferred = true;
+                    issues
+                        .lock()
+                        .unwrap()
+                        .commit_deferred
+                        .insert(source_issue_key.clone());
                     failure_category = ErrorCategory::Launcher;
                 }
             }
@@ -639,11 +844,18 @@ async fn scan_and_import(
                         "설치 이력 저장 실패 — 복구 필요",
                         Some((ErrorCategory::Storage, &error, true)),
                     );
-                    send_notification(
-                        app_handle,
-                        "이력 저장 실패",
-                        &format!("{}: {}", relative, error),
-                    );
+                    let persistence_key = format!("{source_issue_key}\0persistence");
+                    if issues
+                        .lock()
+                        .unwrap()
+                        .source_is_new(persistence_key, &error)
+                    {
+                        send_notification(
+                            app_handle,
+                            "이력 저장 실패",
+                            &format!("{}: {}", relative, error),
+                        );
+                    }
                     if let Err(restart_error) = prismlauncher::restore_after_commit(
                         &config.prismlauncher_exe,
                         &config.prismlauncher_data_dir,
@@ -653,7 +865,7 @@ async fn scan_and_import(
                     {
                         log::error!("이력 저장 실패 후 런처 재실행 실패: {}", restart_error);
                     }
-                    continue;
+                    return;
                 }
                 if let Some(committed) = receipt {
                     if let Err(error) = committed.finish() {
@@ -694,6 +906,9 @@ async fn scan_and_import(
                     &format!("{} 을(를) 가져왔습니다", display_name),
                 );
                 log::info!("가져오기 성공: {}", relative);
+                let mut state = issues.lock().unwrap();
+                state.resolve_all_source_issues(&source_issue_key);
+                state.commit_deferred.remove(&source_issue_key);
             }
             Err(err) => {
                 if cancellation.is_cancelled() {
@@ -730,46 +945,83 @@ async fn scan_and_import(
                         log::error!("가져오기 실패 후 런처 재실행 실패: {}", restart_error);
                     }
                 }
-                if !deferred {
-                    if let Err(save_error) = tracker.mark_failed_retryable(
+                if deferred {
+                    emit_progress(
+                        app_handle,
+                        &job,
+                        ImportPhase::Deferred,
+                        0,
+                        "런처 상태로 설치 보류",
+                        Some((failure_category, &err, true)),
+                    );
+                    if issues
+                        .lock()
+                        .unwrap()
+                        .source_is_new(preflight_issue_key.clone(), launcher_issue_signature(&err))
+                    {
+                        send_notification(
+                            app_handle,
+                            "모드팩 가져오기 보류",
+                            &format!("{}: {}", relative, err),
+                        );
+                    }
+                } else {
+                    let outcome = record_failed_attempt(
+                        tracker,
                         history_key,
                         modified_secs,
                         &snapshot.fingerprint,
-                    ) {
-                        log::error!("실패 이력 저장 실패: {} - {}", relative, save_error);
-                    }
+                        failure_category,
+                        err.clone(),
+                    );
+                    report_failed_attempt(app_handle, &job, issues, &source_issue_key, outcome);
                 }
-                emit_progress(
-                    app_handle,
-                    &job,
-                    if deferred {
-                        ImportPhase::Deferred
-                    } else {
-                        ImportPhase::Failed
-                    },
-                    0,
-                    if deferred {
-                        "런처 상태로 설치 보류"
-                    } else {
-                        "실패"
-                    },
-                    Some((failure_category, &err, true)),
-                );
-                send_notification(
-                    app_handle,
-                    "모드팩 가져오기 실패",
-                    &format!("{}: {}", relative, err),
-                );
                 log::error!("가져오기 실패: {} - {}", relative, err);
             }
         }
     }
+    issues.lock().unwrap().retain_sources(&present_sources);
 }
 
 struct ImportJob {
     id: u64,
     source_id: String,
     file_name: String,
+}
+
+fn report_failed_attempt(
+    app_handle: &tauri::AppHandle,
+    job: &ImportJob,
+    issues: &std::sync::Mutex<IssueNotifications>,
+    source_issue_key: &str,
+    outcome: FailedAttemptOutcome,
+) {
+    emit_progress(
+        app_handle,
+        job,
+        outcome.phase,
+        0,
+        outcome.status,
+        Some((outcome.category, &outcome.message, true)),
+    );
+    let kind = if outcome.persistence_failed {
+        "persistence"
+    } else {
+        "import"
+    };
+    let issue_key = format!("{source_issue_key}\0{kind}");
+    if issues
+        .lock()
+        .unwrap()
+        .source_is_new(issue_key, &outcome.message)
+    {
+        let title = if outcome.persistence_failed {
+            "가져오기 이력 저장 실패"
+        } else {
+            "모드팩 가져오기 실패"
+        };
+        send_notification(app_handle, title, &outcome.message);
+    }
 }
 
 fn emit_progress(
@@ -829,6 +1081,100 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use zip::{write::SimpleFileOptions, ZipWriter};
+
+    #[test]
+    fn issue_notifications_deduplicate_until_resolved_and_prune_deleted_sources() {
+        let mut issues = IssueNotifications::default();
+        assert!(issues.recovery_is_new("root-a".into(), "broken journal"));
+        assert!(!issues.recovery_is_new("root-a".into(), "broken journal"));
+        assert!(issues.recovery_is_new("root-a".into(), "changed journal error"));
+        assert!(!issues.recovery_is_new("root-a".into(), "broken journal"));
+        issues.resolve_recovery("root-a");
+        assert!(issues.recovery_is_new("root-a".into(), "broken journal"));
+
+        assert!(issues.source_is_new("source-a\0preflight".into(), "game running"));
+        assert!(!issues.source_is_new("source-a\0preflight".into(), "game running"));
+        // A tracker backoff/attempt-budget rejection does not call either resolver.
+        // The next poll therefore remains suppressed until production observes success.
+        assert!(!issues.source_is_new("source-a\0preflight".into(), "game running"));
+        assert!(issues.source_is_new("source-b\0preflight".into(), "game running"));
+        issues.commit_deferred.insert("source-a".into());
+        issues.commit_deferred.insert("source-b".into());
+        let present = HashSet::from(["source-b".to_string()]);
+        issues.retain_sources(&present);
+        assert!(!issues.sources.contains_key("source-a\0preflight"));
+        assert!(issues.sources.contains_key("source-b\0preflight"));
+        assert!(!issues.commit_deferred.contains("source-a"));
+        assert!(issues.commit_deferred.contains("source-b"));
+        assert!(issues.recovery.contains_key("root-a"));
+    }
+
+    #[test]
+    fn failed_attempt_save_error_is_the_only_terminal_outcome() {
+        let outcome =
+            record_failed_attempt_with(ErrorCategory::Java, "original import error".into(), || {
+                Err("history disk full".into())
+            });
+        assert!(matches!(outcome.phase, ImportPhase::RecoveryRequired));
+        assert!(matches!(outcome.category, ErrorCategory::Storage));
+        assert_eq!(outcome.message, "history disk full");
+        assert!(outcome.persistence_failed);
+
+        let outcome =
+            record_failed_attempt_with(ErrorCategory::Java, "original import error".into(), || {
+                Ok(())
+            });
+        assert!(matches!(outcome.phase, ImportPhase::Failed));
+        assert!(matches!(outcome.category, ErrorCategory::Java));
+        assert_eq!(outcome.message, "original import error");
+        assert!(!outcome.persistence_failed);
+    }
+
+    #[test]
+    fn new_content_episode_rearms_errors_without_clearing_commit_latch() {
+        let source = "source-a".to_string();
+        let mut issues = IssueNotifications::default();
+        issues
+            .content_episodes
+            .insert(source.clone(), (10, "old".into()));
+        issues.commit_deferred.insert(source.clone());
+        assert!(issues.source_is_new(format!("{source}\0import"), "bad archive"));
+
+        assert!(issues.observe_content_episode(&source, 10, "new"));
+        assert!(issues.source_is_new(format!("{source}\0import"), "bad archive"));
+        assert!(issues.commit_deferred.contains(&source));
+    }
+
+    #[test]
+    fn corrupt_recovery_journal_with_absent_source_notifies_once_across_scans() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Prism");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".auto-tong-journal-broken.json"), b"not-json").unwrap();
+        let root_key = root.to_string_lossy().to_string();
+        let mut issues = IssueNotifications::default();
+
+        for expected_notification in [true, false] {
+            let error =
+                crate::managed_install::recover_journals(&root, |_, _, _| false).unwrap_err();
+            assert_eq!(
+                issues.recovery_is_new(root_key.clone(), &error),
+                expected_notification
+            );
+            issues.retain_sources(&HashSet::new());
+            assert!(issues.recovery.contains_key(&root_key));
+        }
+
+        fs::remove_file(root.join(".auto-tong-journal-broken.json")).unwrap();
+        assert_eq!(
+            crate::managed_install::recover_journals(&root, |_, _, _| false).unwrap(),
+            0
+        );
+        issues.resolve_recovery(&root_key);
+        fs::write(root.join(".auto-tong-journal-broken.json"), b"not-json").unwrap();
+        let error = crate::managed_install::recover_journals(&root, |_, _, _| false).unwrap_err();
+        assert!(issues.recovery_is_new(root_key, &error));
+    }
 
     #[test]
     fn blank_tags_never_match_files() {

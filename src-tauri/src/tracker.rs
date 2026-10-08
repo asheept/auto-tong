@@ -90,7 +90,59 @@ pub struct SourceMapping {
 
 pub struct Tracker {
     data: Mutex<ProcessedFiles>,
+    /// Runtime-only fallback when a failed/cancelled attempt cannot be made durable.
+    /// The latch is intentionally lost when the process restarts.
+    nonpersisted_failures: Mutex<NonpersistedFailures>,
     path: PathBuf,
+    #[cfg(test)]
+    fail_writes: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentIdentity {
+    size: u64,
+    sha256: String,
+}
+
+impl From<&crate::source::Fingerprint> for ContentIdentity {
+    fn from(fingerprint: &crate::source::Fingerprint) -> Self {
+        Self {
+            size: fingerprint.size,
+            sha256: fingerprint.sha256.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct NonpersistedFailures {
+    entries: HashMap<String, ContentIdentity>,
+}
+
+impl NonpersistedFailures {
+    fn insert(&mut self, key: &str, fingerprint: &crate::source::Fingerprint) {
+        self.entries
+            .insert(key.to_string(), ContentIdentity::from(fingerprint));
+    }
+
+    fn blocks(&mut self, key: &str, fingerprint: &crate::source::Fingerprint) -> bool {
+        let current = ContentIdentity::from(fingerprint);
+        match self.entries.get(key) {
+            Some(saved) if saved == &current => true,
+            Some(_) => {
+                self.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
+
+fn same_content(left: &crate::source::Fingerprint, right: &crate::source::Fingerprint) -> bool {
+    left.size == right.size && left.sha256 == right.sha256
 }
 
 impl ProcessedFiles {
@@ -238,7 +290,10 @@ impl Tracker {
         if !path.exists() {
             return Ok(Self {
                 data: Mutex::new(ProcessedFiles::empty_v2()),
+                nonpersisted_failures: Mutex::new(NonpersistedFailures::default()),
                 path,
+                #[cfg(test)]
+                fail_writes: std::sync::atomic::AtomicBool::new(false),
             });
         }
         let raw = fs::read(&path).map_err(|e| format!("이력 파일 읽기 실패: {e}"))?;
@@ -285,7 +340,10 @@ impl Tracker {
         }
         let tracker = Self {
             data: Mutex::new(data),
+            nonpersisted_failures: Mutex::new(NonpersistedFailures::default()),
             path,
+            #[cfg(test)]
+            fail_writes: std::sync::atomic::AtomicBool::new(false),
         };
         if migrating {
             let json =
@@ -342,16 +400,29 @@ impl Tracker {
         now: u64,
     ) -> bool {
         let modified_secs = crate::source::observed_seconds(fingerprint);
+        let mut guard = match self.nonpersisted_failures.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                log::error!("Tracker 비영속 실패 보호 락 획득 실패: {}", error);
+                return false;
+            }
+        };
+        if guard.blocks(key, fingerprint) {
+            return false;
+        }
         let data = match self.data.lock() {
             Ok(data) => data,
-            Err(_) => return true,
+            Err(error) => {
+                log::error!("Tracker 락 획득 실패: {}", error);
+                return false;
+            }
         };
         if data.retry_requested.contains(key) {
             return true;
         }
         let failed_match = data.failed_fingerprints.get(key).map_or_else(
             || data.failed.get(key).copied() == Some(modified_secs),
-            |failed| failed == fingerprint,
+            |failed| same_content(failed, fingerprint),
         );
         if failed_match {
             return data
@@ -447,7 +518,7 @@ impl Tracker {
         token: &str,
         fingerprint: Option<&crate::source::Fingerprint>,
     ) -> Result<(), String> {
-        self.update(|data| {
+        self.update_with_guard(relative_path, None, |data| {
             data.imported
                 .insert(relative_path.to_string(), modified_secs);
             data.failed.remove(relative_path);
@@ -513,9 +584,11 @@ impl Tracker {
         retryable: bool,
         now: u64,
     ) -> Result<(), String> {
-        self.update(|data| {
+        self.update_with_guard(relative_path, fingerprint, |data| {
             let same_failure = fingerprint.is_some_and(|current| {
-                data.failed_fingerprints.get(relative_path) == Some(current)
+                data.failed_fingerprints
+                    .get(relative_path)
+                    .is_some_and(|failed| same_content(failed, current))
             });
             let old_attempts = if same_failure {
                 data.records
@@ -566,7 +639,7 @@ impl Tracker {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.update(|data| {
+        self.update_with_guard(relative_path, Some(fingerprint), |data| {
             data.failed.insert(relative_path.to_string(), modified_secs);
             data.failed_fingerprints
                 .insert(relative_path.to_string(), fingerprint.clone());
@@ -658,12 +731,31 @@ impl Tracker {
 
     /// 재가져오기 의도를 저장하며 기존 성공 설치 기록은 유지한다.
     pub fn request_reimport(&self, relative_path: &str) -> Result<(), String> {
-        self.update(|data| {
+        self.update_with_guard(relative_path, None, |data| {
             data.retry_requested.insert(relative_path.to_string());
             if let Some(record) = data.records.get_mut(relative_path) {
                 record.auto_retry = None;
             }
         })
+    }
+
+    fn update_with_guard<T>(
+        &self,
+        relative_path: &str,
+        failure_fingerprint: Option<&crate::source::Fingerprint>,
+        change: impl FnOnce(&mut ProcessedFiles) -> T,
+    ) -> Result<T, String> {
+        let mut failures = self
+            .nonpersisted_failures
+            .lock()
+            .map_err(|error| format!("Tracker 비영속 실패 보호 락 획득 실패: {error}"))?;
+        let result = self.update(change);
+        match (&result, failure_fingerprint) {
+            (Ok(_), _) => failures.remove(relative_path),
+            (Err(_), Some(fingerprint)) => failures.insert(relative_path, fingerprint),
+            (Err(_), None) => {}
+        }
+        result
     }
 
     fn update<T>(&self, change: impl FnOnce(&mut ProcessedFiles) -> T) -> Result<T, String> {
@@ -682,6 +774,10 @@ impl Tracker {
 
     /// 같은 디렉터리의 고유 임시 파일을 완전히 쓴 후 교체한다.
     fn atomic_write(&self, content: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("테스트 이력 저장 실패".into());
+        }
         if self.path.is_file() {
             let old = fs::read(&self.path).map_err(|e| format!("이전 이력 백업 읽기 실패: {e}"))?;
             let backup = self.path.with_file_name("processed.backup.json");
@@ -715,7 +811,17 @@ mod tests {
     fn at(path: PathBuf) -> Tracker {
         Tracker {
             data: Mutex::new(ProcessedFiles::default()),
+            nonpersisted_failures: Mutex::new(NonpersistedFailures::default()),
             path,
+            fail_writes: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn fingerprint(modified_nanos: u128, sha256: &str) -> crate::source::Fingerprint {
+        crate::source::Fingerprint {
+            size: 7,
+            modified_nanos,
+            sha256: sha256.into(),
         }
     }
 
@@ -755,6 +861,102 @@ mod tests {
         let tracker = at(destination);
         assert!(tracker.mark_processed("pack", 1).is_err());
         assert!(tracker.needs_import("pack", 1));
+    }
+
+    #[test]
+    fn failed_failure_write_blocks_old_manual_retry_until_reimport_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = at(dir.path().join("processed.json"));
+        let original = fingerprint(1_000_000_000, "same-content");
+        tracker
+            .mark_processed_with_fingerprint("pack", 1, "token", Some(&original))
+            .unwrap();
+        tracker.request_reimport("pack").unwrap();
+
+        tracker
+            .fail_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(tracker
+            .mark_failed_retryable_at("pack", 1, Some(&original), true, 100)
+            .is_err());
+        assert!(tracker
+            .data
+            .lock()
+            .unwrap()
+            .retry_requested
+            .contains("pack"));
+        assert!(!tracker.needs_import_fingerprint_at("pack", &original, u64::MAX));
+        assert_eq!(tracker.get_history_with_status()[0].status, "ok");
+
+        assert!(tracker.request_reimport("pack").is_err());
+        assert!(!tracker.needs_import_fingerprint_at("pack", &original, u64::MAX));
+
+        tracker
+            .fail_writes
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        tracker.request_reimport("pack").unwrap();
+        assert!(tracker.needs_import_fingerprint_at("pack", &original, u64::MAX));
+    }
+
+    #[test]
+    fn failed_failure_write_guard_uses_content_not_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = at(dir.path().join("processed.json"));
+        let original = fingerprint(1_000_000_000, "same-content");
+        tracker
+            .fail_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(tracker
+            .mark_failed_retryable_at("pack", 1, Some(&original), true, 100)
+            .is_err());
+
+        let touched = fingerprint(9_000_000_000, "same-content");
+        let changed = fingerprint(9_000_000_000, "changed-content");
+        assert!(!tracker.needs_import_fingerprint_at("pack", &touched, u64::MAX));
+        assert!(tracker.needs_import_fingerprint_at("pack", &changed, u64::MAX));
+        assert!(tracker.get_history_with_status().is_empty());
+    }
+
+    #[test]
+    fn failed_cancel_write_blocks_same_content_without_publishing_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = at(dir.path().join("processed.json"));
+        let original = fingerprint(1_000_000_000, "same-content");
+        tracker
+            .fail_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(tracker.mark_cancelled("pack", &original).is_err());
+        assert!(tracker.get_history_with_status().is_empty());
+        assert!(!tracker.needs_import_fingerprint_at(
+            "pack",
+            &fingerprint(2_000_000_000, "same-content"),
+            u64::MAX
+        ));
+        assert!(tracker.needs_import_fingerprint_at(
+            "pack",
+            &fingerprint(2_000_000_000, "changed-content"),
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn poisoned_nonpersisted_guard_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = Arc::new(at(dir.path().join("processed.json")));
+        let poison = Arc::clone(&tracker);
+        assert!(std::thread::spawn(move || {
+            let _guard = poison.nonpersisted_failures.lock().unwrap();
+            panic!("poison guard");
+        })
+        .join()
+        .is_err());
+
+        assert!(!tracker.needs_import_fingerprint_at(
+            "pack",
+            &fingerprint(1_000_000_000, "content"),
+            0
+        ));
     }
 
     #[test]
@@ -997,7 +1199,8 @@ mod tests {
     #[test]
     fn unchanged_source_retries_twice_after_backoff_then_needs_manual_request() {
         let root = tempfile::tempdir().unwrap();
-        let tracker = Tracker::open_at(root.path().join("processed.json")).unwrap();
+        let path = root.path().join("processed.json");
+        let tracker = Tracker::open_at(path.clone()).unwrap();
         let fingerprint = crate::source::Fingerprint {
             size: 4,
             modified_nanos: 1_000_000_000,
@@ -1011,17 +1214,40 @@ mod tests {
             .unwrap();
         assert!(!tracker.needs_import_fingerprint_at("source-a", &fingerprint, 129));
         assert!(tracker.needs_import_fingerprint_at("source-a", &fingerprint, 130));
+        let touched = crate::source::Fingerprint {
+            modified_nanos: 2_000_000_000,
+            ..fingerprint.clone()
+        };
         tracker
-            .mark_failed_retryable_at("source-a", 1, Some(&fingerprint), true, 130)
+            .mark_failed_retryable_at("source-a", 2, Some(&touched), true, 130)
             .unwrap();
-        assert!(!tracker.needs_import_fingerprint_at("source-a", &fingerprint, 249));
-        assert!(tracker.needs_import_fingerprint_at("source-a", &fingerprint, 250));
+        drop(tracker);
+
+        let tracker = Tracker::open_at(path.clone()).unwrap();
+        assert!(!tracker.needs_import_fingerprint_at("source-a", &touched, 249));
+        assert!(tracker.needs_import_fingerprint_at("source-a", &touched, 250));
+        let touched_again = crate::source::Fingerprint {
+            modified_nanos: 3_000_000_000,
+            ..fingerprint.clone()
+        };
         tracker
-            .mark_failed_retryable_at("source-a", 1, Some(&fingerprint), true, 250)
+            .mark_failed_retryable_at("source-a", 3, Some(&touched_again), true, 250)
             .unwrap();
-        assert!(!tracker.needs_import_fingerprint_at("source-a", &fingerprint, 1000));
+        drop(tracker);
+
+        let tracker = Tracker::open_at(path).unwrap();
+        assert!(!tracker.needs_import_fingerprint_at("source-a", &touched_again, 1000));
+        let data = tracker.data.lock().unwrap();
+        let retry = data
+            .records
+            .get("source-a")
+            .and_then(|record| record.auto_retry.as_ref())
+            .unwrap();
+        assert_eq!(retry.attempts, 3);
+        assert_eq!(retry.next_retry_secs, 250);
+        drop(data);
         tracker.request_reimport("source-a").unwrap();
-        assert!(tracker.needs_import_fingerprint_at("source-a", &fingerprint, 1000));
+        assert!(tracker.needs_import_fingerprint_at("source-a", &touched_again, 1000));
         assert_eq!(tracker.get_history_with_status()[0].status, "retry_failed");
     }
 
@@ -1037,6 +1263,11 @@ mod tests {
         tracker.mark_cancelled("source-a", &fingerprint).unwrap();
         assert_eq!(tracker.get_history_with_status()[0].status, "cancelled");
         assert!(!tracker.needs_import_fingerprint_at("source-a", &fingerprint, u64::MAX));
+        let touched = crate::source::Fingerprint {
+            modified_nanos: 2_000_000_000,
+            ..fingerprint.clone()
+        };
+        assert!(!tracker.needs_import_fingerprint_at("source-a", &touched, u64::MAX));
         let reopened = Tracker::open_at(root.path().join("processed.json")).unwrap();
         assert_eq!(reopened.get_history_with_status()[0].status, "cancelled");
         reopened.request_reimport("source-a").unwrap();

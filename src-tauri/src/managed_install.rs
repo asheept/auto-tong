@@ -79,6 +79,8 @@ pub fn commit_stage(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommitCheckpoint {
+    InitialJournalWrite,
+    InitialJournalPublish,
     Prepared,
     BackupRenamed,
     BackupRecorded,
@@ -96,19 +98,20 @@ fn commit_stage_with_hook(
 ) -> Result<CommitReceipt, String> {
     let instances = target.parent().ok_or("인스턴스 상위 폴더 없음")?;
     let root = instances.parent().ok_or("Prism 데이터 폴더 없음")?;
-    let backup_root = tempfile::Builder::new()
+    let backup = tempfile::Builder::new()
         .prefix(".auto-tong-backup-")
         .tempdir_in(root)
-        .map_err(|e| format!("설치 백업 폴더 생성 실패: {e}"))?
-        .keep();
-    let journal_path = tempfile::Builder::new()
-        .prefix(".auto-tong-journal-")
-        .suffix(".json")
+        .map_err(|e| format!("설치 백업 폴더 생성 실패: {e}"))?;
+    let mut initial_journal = tempfile::Builder::new()
+        .prefix(".auto-tong-journal-write-")
         .tempfile_in(root)
-        .map_err(|e| format!("설치 journal 생성 실패: {e}"))?
-        .keep()
-        .map_err(|e| format!("설치 journal 보존 실패: {e}"))?
-        .1;
+        .map_err(|e| format!("설치 journal 임시 파일 생성 실패: {e}"))?;
+    let unique_name = initial_journal
+        .path()
+        .file_name()
+        .ok_or("설치 journal 임시 이름 없음")?
+        .to_string_lossy();
+    let journal_path = root.join(format!(".auto-tong-journal-{unique_name}.json"));
     let commit_token = journal_path
         .file_name()
         .ok_or("설치 journal 이름 없음")?
@@ -122,10 +125,24 @@ fn commit_stage_with_hook(
         history_key: history_key.to_string(),
         modified_secs,
         target: target.to_path_buf(),
-        backup_root,
+        backup_root: backup.path().to_path_buf(),
         stage_instance: stage_instance.to_path_buf(),
     };
-    write_journal(&journal_path, &journal)?;
+    checkpoint(CommitCheckpoint::InitialJournalWrite)?;
+    serde_json::to_writer_pretty(&mut initial_journal, &journal)
+        .map_err(|e| format!("설치 journal 쓰기 실패: {e}"))?;
+    initial_journal
+        .write_all(b"\n")
+        .map_err(|e| format!("설치 journal 쓰기 실패: {e}"))?;
+    initial_journal
+        .as_file()
+        .sync_all()
+        .map_err(|e| format!("설치 journal 동기화 실패: {e}"))?;
+    checkpoint(CommitCheckpoint::InitialJournalPublish)?;
+    initial_journal
+        .persist_noclobber(&journal_path)
+        .map_err(|e| format!("설치 journal 저장 실패: {}", e.error))?;
+    journal.backup_root = backup.keep();
     checkpoint(CommitCheckpoint::Prepared)?;
     let old = journal.backup_root.join("old");
     if target.exists() {
@@ -452,6 +469,58 @@ fn merge_into_stage_with_available(
 mod tests {
     use super::*;
 
+    fn assert_initial_journal_failure_is_clean(stop: CommitCheckpoint) {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("PrismData");
+        let target = data.join("instances/pack");
+        let stage = data.join(".auto-tong-stage-test/instances/pack");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(target.join("marker"), b"old").unwrap();
+        fs::write(stage.join("marker"), b"new").unwrap();
+
+        let existing_journal = data.join(".auto-tong-journal-existing.json");
+        let existing_backup = data.join(".auto-tong-backup-existing");
+        fs::write(&existing_journal, b"existing journal").unwrap();
+        fs::create_dir(&existing_backup).unwrap();
+        fs::write(existing_backup.join("marker"), b"existing backup").unwrap();
+
+        assert!(
+            commit_stage_with_hook(&stage, &target, "source", "pack.zip", 1, |point| {
+                if point == stop {
+                    Err("injected initial journal failure".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+
+        assert_eq!(fs::read(target.join("marker")).unwrap(), b"old");
+        assert_eq!(fs::read(stage.join("marker")).unwrap(), b"new");
+        assert_eq!(fs::read(&existing_journal).unwrap(), b"existing journal");
+        assert_eq!(
+            fs::read(existing_backup.join("marker")).unwrap(),
+            b"existing backup"
+        );
+        let mut artifacts: Vec<_> = fs::read_dir(&data)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().to_string();
+                (name.starts_with(".auto-tong-journal-") || name.starts_with(".auto-tong-backup-"))
+                    .then_some(name)
+            })
+            .collect();
+        artifacts.sort();
+        assert_eq!(
+            artifacts,
+            vec![
+                ".auto-tong-backup-existing".to_string(),
+                ".auto-tong-journal-existing.json".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn reimport_preserves_user_files_and_removes_only_unchanged_managed_files() {
         let root = tempfile::tempdir().unwrap();
@@ -532,6 +601,59 @@ mod tests {
         assert!(error.contains("공간 부족"));
         assert_eq!(fs::read(target.join("options.txt")).unwrap(), b"user data");
         assert!(!stage.join(MANIFEST).exists());
+    }
+
+    #[test]
+    fn initial_journal_write_failure_leaves_no_artifacts_or_changes() {
+        assert_initial_journal_failure_is_clean(CommitCheckpoint::InitialJournalWrite);
+    }
+
+    #[test]
+    fn initial_journal_publish_failure_leaves_no_artifacts_or_changes() {
+        assert_initial_journal_failure_is_clean(CommitCheckpoint::InitialJournalPublish);
+    }
+
+    #[test]
+    fn initial_journal_collision_preserves_existing_file_and_instances() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("PrismData");
+        let target = data.join("instances/pack");
+        let stage = data.join(".auto-tong-stage-test/instances/pack");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(target.join("marker"), b"old").unwrap();
+        fs::write(stage.join("marker"), b"new").unwrap();
+
+        let mut collision_path = None;
+        let result = commit_stage_with_hook(&stage, &target, "source", "pack.zip", 1, |point| {
+            if point == CommitCheckpoint::InitialJournalPublish {
+                let pending_name = fs::read_dir(&data)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+                    .find(|name| name.starts_with(".auto-tong-journal-write-"))
+                    .unwrap();
+                let path = data.join(format!(".auto-tong-journal-{pending_name}.json"));
+                fs::write(&path, b"existing collision").unwrap();
+                collision_path = Some(path);
+            }
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        let collision_path = collision_path.unwrap();
+        assert_eq!(fs::read(&collision_path).unwrap(), b"existing collision");
+        assert_eq!(fs::read(target.join("marker")).unwrap(), b"old");
+        assert_eq!(fs::read(stage.join("marker")).unwrap(), b"new");
+        assert!(!fs::read_dir(&data).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".auto-tong-backup-")));
+        assert!(!fs::read_dir(&data).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".auto-tong-journal-write-")));
     }
 
     #[test]
