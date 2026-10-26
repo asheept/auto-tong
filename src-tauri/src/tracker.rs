@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +143,53 @@ impl NonpersistedFailures {
 
 fn same_content(left: &crate::source::Fingerprint, right: &crate::source::Fingerprint) -> bool {
     left.size == right.size && left.sha256 == right.sha256
+}
+
+fn direct_child_names(instances_dir: &Path) -> Result<HashSet<String>, String> {
+    let entries = match fs::read_dir(instances_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => {
+            return Err(format!(
+                "인스턴스 디렉터리 읽기 실패 ({}): {error}",
+                instances_dir.display()
+            ))
+        }
+    };
+    entries
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
+                .map_err(|error| {
+                    format!(
+                        "인스턴스 디렉터리 항목 읽기 실패 ({}): {error}",
+                        instances_dir.display()
+                    )
+                })
+        })
+        .collect()
+}
+
+fn available_instance_id(suggested: &str, occupied: &HashSet<String>) -> Result<String, String> {
+    crate::import_path::safe_relative(suggested)?;
+    let (display, suffix) = suggested
+        .rsplit_once('-')
+        .filter(|(_, suffix)| suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("제안된 인스턴스 ID가 올바르지 않습니다: {suggested}"))?;
+    let start = u16::from_str_radix(suffix, 16)
+        .map_err(|_| format!("제안된 인스턴스 ID가 올바르지 않습니다: {suggested}"))?;
+
+    for offset in 0..=u16::MAX {
+        let candidate = format!("{display}-{:04x}", start.wrapping_add(offset));
+        if !occupied.contains(&candidate.to_lowercase()) {
+            crate::import_path::safe_relative(&candidate)?;
+            return Ok(candidate);
+        }
+    }
+    Err(
+        "사용 가능한 인스턴스 ID가 없습니다: 4자리 16진수 접미사 65536개가 모두 사용 중입니다"
+            .into(),
+    )
 }
 
 impl ProcessedFiles {
@@ -454,7 +501,8 @@ impl Tracker {
                 return Ok(mapping.clone());
             }
         }
-        self.update(|data| {
+        let filesystem_names = direct_child_names(instances_dir)?;
+        self.update(move |data| {
             if let Some(mapping) = data.source_map.get(&identity.id) {
                 return Ok(mapping.clone());
             }
@@ -477,7 +525,17 @@ impl Tracker {
                 }
                 (legacy_stem.to_string(), legacy_key)
             } else {
-                (identity.suggested_instance_id.clone(), identity.id.clone())
+                let mut occupied = filesystem_names;
+                occupied.extend(
+                    data.source_map
+                        .iter()
+                        .filter(|(source_id, _)| *source_id != &identity.id)
+                        .map(|(_, mapping)| mapping.instance_id.to_lowercase()),
+                );
+                (
+                    available_instance_id(&identity.suggested_instance_id, &occupied)?,
+                    identity.id.clone(),
+                )
             };
             let mapping = SourceMapping { root: identity.root.clone(),
                 relative_path: identity.relative_path.clone(), instance_id, history_key };
@@ -825,6 +883,15 @@ mod tests {
         }
     }
 
+    fn identity(hex: char, relative_path: &str, suggested: &str) -> crate::source::SourceIdentity {
+        crate::source::SourceIdentity {
+            id: format!("source-{}", hex.to_string().repeat(64)),
+            root: "test-root".into(),
+            relative_path: relative_path.into(),
+            suggested_instance_id: suggested.into(),
+        }
+    }
+
     #[test]
     fn concurrent_writes_keep_all_entries() {
         let dir = tempfile::tempdir().unwrap();
@@ -1068,6 +1135,167 @@ mod tests {
         let stored: ProcessedFiles =
             serde_json::from_slice(&fs::read(root.path().join("processed.json")).unwrap()).unwrap();
         assert_eq!(stored.source_map.len(), 3);
+    }
+
+    #[test]
+    fn colliding_short_suffixes_allocate_deterministically_and_survive_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("processed.json");
+        let instances = root.path().join("instances");
+        let first_identity = identity('a', "a/pack.zip", "pack-00ff");
+        let second_identity = identity('b', "b/pack.zip", "pack-00ff");
+        assert_ne!(first_identity.id, second_identity.id);
+
+        let tracker = at(path.clone());
+        let first = tracker
+            .resolve_source(&first_identity, "pack", &instances)
+            .unwrap();
+        let second = tracker
+            .resolve_source(&second_identity, "pack", &instances)
+            .unwrap();
+        assert_eq!(first.instance_id, "pack-00ff");
+        assert_eq!(second.instance_id, "pack-0100");
+        assert_eq!(
+            tracker
+                .resolve_source(&second_identity, "pack", &instances)
+                .unwrap()
+                .instance_id,
+            "pack-0100"
+        );
+        drop(tracker);
+
+        let reopened = Tracker::open_at(path).unwrap();
+        assert_eq!(
+            reopened
+                .resolve_source(&first_identity, "pack", &instances)
+                .unwrap()
+                .instance_id,
+            "pack-00ff"
+        );
+        assert_eq!(
+            reopened
+                .resolve_source(&second_identity, "pack", &instances)
+                .unwrap()
+                .instance_id,
+            "pack-0100"
+        );
+    }
+
+    #[test]
+    fn filesystem_case_alias_is_skipped_without_touching_it() {
+        let root = tempfile::tempdir().unwrap();
+        let instances = root.path().join("instances");
+        fs::create_dir(&instances).unwrap();
+        let occupied = instances.join("PACK-00FF");
+        fs::write(&occupied, b"keep").unwrap();
+        let tracker = at(root.path().join("processed.json"));
+
+        let mapping = tracker
+            .resolve_source(
+                &identity('c', "c/pack.zip", "pack-00ff"),
+                "pack",
+                &instances,
+            )
+            .unwrap();
+        assert_eq!(mapping.instance_id, "pack-0100");
+        assert_eq!(fs::read(occupied).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn unreadable_instances_path_does_not_publish_a_new_mapping() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("processed.json");
+        let instances_file = root.path().join("instances-file");
+        fs::write(&instances_file, b"not a directory").unwrap();
+        let tracker = at(path.clone());
+        tracker.update(|_| {}).unwrap();
+
+        let error = tracker
+            .resolve_source(
+                &identity('d', "new/pack.zip", "pack-dddd"),
+                "pack",
+                &instances_file,
+            )
+            .unwrap_err();
+        assert!(error.contains("인스턴스 디렉터리 읽기 실패"));
+        assert!(tracker.data.lock().unwrap().source_map.is_empty());
+
+        let stored: ProcessedFiles = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(stored.source_map.is_empty());
+    }
+
+    #[test]
+    fn all_short_suffixes_occupied_returns_an_error() {
+        let occupied: HashSet<String> = (0..=u16::MAX)
+            .map(|suffix| format!("pack-{suffix:04x}"))
+            .collect();
+
+        let error = available_instance_id("pack-ffff", &occupied).unwrap_err();
+        assert!(error.contains("65536"));
+    }
+
+    #[test]
+    fn existing_twelve_digit_mapping_is_reused_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("processed.json");
+        let identity = identity('d', "legacy/pack.zip", "pack-dddd");
+        let old_instance_id = "pack-0123456789ab";
+        let tracker = at(path.clone());
+        tracker
+            .update(|data| {
+                data.source_map.insert(
+                    identity.id.clone(),
+                    SourceMapping {
+                        root: identity.root.clone(),
+                        relative_path: identity.relative_path.clone(),
+                        instance_id: old_instance_id.into(),
+                        history_key: identity.id.clone(),
+                    },
+                );
+            })
+            .unwrap();
+        drop(tracker);
+        let not_a_directory = root.path().join("not-a-directory");
+        fs::write(&not_a_directory, b"occupied").unwrap();
+
+        let reopened = Tracker::open_at(path).unwrap();
+        let mapping = reopened
+            .resolve_source(&identity, "pack", &not_a_directory)
+            .unwrap();
+        assert_eq!(mapping.instance_id, old_instance_id);
+    }
+
+    #[test]
+    fn short_suffix_search_wraps_past_ffff() {
+        let root = tempfile::tempdir().unwrap();
+        let instances = root.path().join("instances");
+        fs::create_dir(&instances).unwrap();
+        fs::write(instances.join("PACK-0000"), b"keep").unwrap();
+        let tracker = at(root.path().join("processed.json"));
+        let occupied_identity = identity('e', "occupied/pack.zip", "pack-ffff");
+        tracker
+            .update(|data| {
+                data.source_map.insert(
+                    occupied_identity.id.clone(),
+                    SourceMapping {
+                        root: occupied_identity.root.clone(),
+                        relative_path: occupied_identity.relative_path.clone(),
+                        instance_id: "pack-ffff".into(),
+                        history_key: occupied_identity.id.clone(),
+                    },
+                );
+            })
+            .unwrap();
+
+        let mapping = tracker
+            .resolve_source(
+                &identity('f', "new/pack.zip", "pack-ffff"),
+                "pack",
+                &instances,
+            )
+            .unwrap();
+        assert_eq!(mapping.instance_id, "pack-0001");
+        assert_eq!(fs::read(instances.join("PACK-0000")).unwrap(), b"keep");
     }
 
     #[test]

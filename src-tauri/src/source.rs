@@ -43,7 +43,7 @@ pub fn identify(root: &Path, relative: &str, stem: &str) -> Result<SourceIdentit
     let display: String = stem
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_') {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '@') {
                 c
             } else {
                 '-'
@@ -53,7 +53,7 @@ pub fn identify(root: &Path, relative: &str, stem: &str) -> Result<SourceIdentit
         .collect();
     let display = display.trim_matches('-');
     let display = if display.is_empty() { "pack" } else { display };
-    let suggested_instance_id = format!("{}-{}", display, &digest_hex[..12]);
+    let suggested_instance_id = format!("{}-{}", display, &digest_hex[..4]);
     crate::import_path::safe_relative(&suggested_instance_id)?;
     Ok(SourceIdentity {
         id,
@@ -199,13 +199,36 @@ mod tests {
         let b = identify(root.path(), "b/pack.zip", "pack").unwrap();
         let moved = identify(other.path(), "a/pack.zip", "pack").unwrap();
         assert_ne!(a.id, b.id);
-        assert_ne!(a.suggested_instance_id, b.suggested_instance_id);
         assert_ne!(a.id, moved.id);
         #[cfg(target_os = "windows")]
         {
             let spelling = identify(root.path(), "A\\PACK.ZIP", "pack").unwrap();
             assert_eq!(a.id, spelling.id);
         }
+    }
+
+    #[test]
+    fn identity_keeps_full_hash_and_uses_safe_four_digit_display_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = identify(root.path(), "nested/pack.zip", "@pack").unwrap();
+        let digest = identity.id.strip_prefix("source-").unwrap();
+
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_eq!(
+            identity.suggested_instance_id,
+            format!("@pack-{}", &digest[..4])
+        );
+
+        let long = identify(root.path(), "long.zip", &"a".repeat(80)).unwrap();
+        assert_eq!(
+            long.suggested_instance_id.rsplit_once('-').unwrap().0.len(),
+            48
+        );
+        let fallback = identify(root.path(), "fallback.zip", "???").unwrap();
+        assert!(fallback.suggested_instance_id.starts_with("pack-"));
     }
 
     #[test]
